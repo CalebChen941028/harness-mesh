@@ -1,0 +1,272 @@
+# Harness-Mesh configuration template.
+#
+# Every harness below is described by *how to reach it* (binary, command
+# template, config locations, credential environment variables) and never by a
+# hard-coded model catalogue.  Models are discovered at runtime from local
+# activation files, environment variables, live /v1/models endpoints and CLI
+# enumeration subcommands.
+#
+# Command templates accept these placeholders:
+#   {prompt} {system_prompt} {system_prompt_file} {model} {effort}
+#   {workdir} {mcp_config} {task_id} {assignment_id}
+# A flag/value pair is dropped automatically when its value is empty (for
+# example `--model {model}` when the harness should use its own active model).
+
+state_dir: .harness-mesh
+summary_max_chars: 1500
+diff_preview_max_chars: 4000
+default_timeout_seconds: 1800
+max_call_depth: 3
+max_failover_attempts: 4
+transient_retries: 1
+quota_cooldown_seconds: 300
+quota_probe_interval_seconds: 60
+model_cache_ttl_seconds: 300
+suspend_when_no_candidate: true
+difficulty_effort_map:
+  low: low
+  medium: medium
+  high: high
+  critical: high
+difficulty_timeout_seconds:
+  low: 600
+  medium: 1200
+  high: 1800
+  critical: 3600
+failover_on_error: true
+failover_priority:
+  - claude_code
+  - codex
+  - deepseek
+  - antigravity
+  - zcode
+
+skill_roots:
+  - ~/.dsh/skills
+  - ~/.gemini/config/skills
+  - ~/.gemini/skills
+  - ~/.agents/skills
+  - ~/.claude/skills
+  - "{workspace}/.harness-mesh/skills"
+
+plugin_roots:
+  - "{workspace}"
+  - "{workspace}/.harness-mesh/plugins"
+  - ~/.claude
+  - ~/.codex
+  - ~/.dsh
+  - ~/.gemini
+
+harnesses:
+  claude_code:
+    enabled: true
+    display_name: Claude Code
+    binary: claude
+    binary_paths:
+      - "~/Library/Application Support/Claude/claude-code/*/*/claude.app/Contents/MacOS/claude"
+      - ~/.local/bin/claude
+      - /opt/homebrew/bin/claude
+      - /usr/local/bin/claude
+    binary_aliases: []
+    version_args: ["--version"]
+    auto_approve: true
+    model_list_args: ["models", "list"]
+    auth_style: anthropic
+    base_url_env: [ANTHROPIC_BASE_URL]
+    api_key_env: [ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN]
+    default_base_url: https://api.anthropic.com
+    models_endpoint: /v1/models
+    models_response_shape: openai
+    config_files:
+      - ~/.claude/cache/model-catalog/*.json
+      - ~/.claude.json
+      - ~/.claude/settings.json
+      - "{workspace}/.claude/settings.json"
+      - "{workspace}/.claude/settings.local.json"
+    env_model_variables:
+      - ANTHROPIC_MODEL
+      - ANTHROPIC_SMALL_FAST_MODEL
+      - ANTHROPIC_DEFAULT_HAIKU_MODEL
+      - ANTHROPIC_DEFAULT_SONNET_MODEL
+      - ANTHROPIC_DEFAULT_OPUS_MODEL
+    execute_template:
+      - claude
+      - -p
+      - "{prompt}"
+      - --output-format
+      - json
+      - --model
+      - "{model}"
+      - --effort
+      - "{effort}"
+      - --append-system-prompt
+      - "{system_prompt}"
+      - --mcp-config
+      - "{mcp_config}"
+    skill_injection: system_prompt
+
+  codex:
+    enabled: true
+    display_name: OpenAI Codex CLI
+    binary: codex
+    binary_paths:
+      - /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex
+      - ~/.codex/plugins/.plugin-appserver/codex-cli/bin/codex
+      - /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex
+      - /opt/homebrew/bin/codex
+      - /usr/local/bin/codex
+    binary_aliases: []
+    version_args: ["--version"]
+    auto_approve: true
+    # Codex has no stable model-list subcommand; discovery falls back to
+    # config/API state and only emits <cli_active_default> for an empty inventory.
+    model_list_args: []
+    auth_style: bearer
+    base_url_env: [OPENAI_BASE_URL]
+    api_key_env: [OPENAI_API_KEY, CODEX_API_KEY]
+    default_base_url: https://api.openai.com
+    models_endpoint: /v1/models
+    models_response_shape: openai
+    config_files:
+      - ~/.codex/config.toml
+      - ~/.codex/models_cache.json
+      - ~/.codex/auth.json
+      - "{workspace}/.codex/config.toml"
+    env_model_variables: [CODEX_MODEL, OPENAI_MODEL]
+    execute_template:
+      - codex
+      - exec
+      - --skip-git-repo-check
+      - --cd
+      - "{workdir}"
+      - --json
+      - --model
+      - "{model}"
+      - "{prompt}"
+    skill_injection: prompt
+    extra:
+      # codex-cli 0.166 removed --full-auto from exec; newer/older releases
+      # differ. Delete this override for versions that accept --full-auto.
+      auto_approve_args: [--dangerously-bypass-approvals-and-sandbox]
+
+  deepseek:
+    enabled: true
+    display_name: DeepSeek Harness
+    binary: dsh
+    binary_paths:
+      - /Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh
+      - ~/.dsh/bin/dsh
+      - /opt/homebrew/bin/dsh
+      - /usr/local/bin/dsh
+    binary_aliases: [deepseek]
+    version_args: ["--version"]
+    auto_approve: true
+    model_list_args: []
+    auth_style: bearer
+    base_url_env: [DEEPSEEK_BASE_URL, DSH_BASE_URL]
+    api_key_env: [DEEPSEEK_API_KEY, DSH_API_KEY]
+    default_base_url: https://api.deepseek.com
+    models_endpoint: /v1/models
+    models_response_shape: openai
+    config_files:
+      - "{dsh_home}/profiles/desktop/cordis.patch.yml"
+      - "{dsh_home}/profiles/default/cordis.patch.yml"
+      - "{dsh_home}/profiles/headless/cordis.patch.yml"
+      - ~/.deepseek/config.json
+      - "{workspace}/.deepseek.yaml"
+    env_model_variables: [DEEPSEEK_MODEL, DSH_MODEL]
+    execute_template:
+      - dsh
+      - --profile
+      - headless
+      - --json
+      - "{prompt}"
+    skill_injection: native
+    extra:
+      fallback_binary: deepseek
+      builtin_runtime: true
+      builtin_api_key_env: DEEPSEEK_API_KEY
+      builtin_base_url: https://api.deepseek.com
+      builtin_max_turns: 12
+      desktop_profile: desktop
+      headless_profile: headless
+      overlay_enabled: true
+
+  antigravity:
+    enabled: true
+    display_name: Google Antigravity
+    binary: agy
+    binary_paths:
+      - /Applications/Gemini.app/Contents/Helpers/agy
+      - ~/.local/bin/agy
+      - /opt/homebrew/bin/agy
+      - /usr/local/bin/agy
+    binary_aliases: []
+    version_args: ["--version"]
+    auto_approve: true
+    model_list_args: ["models"]
+    auth_style: gemini
+    base_url_env: [ANTIGRAVITY_BASE_URL, GEMINI_API_BASE_URL]
+    api_key_env: [GEMINI_API_KEY, GOOGLE_API_KEY, ANTIGRAVITY_API_KEY]
+    default_base_url: https://generativelanguage.googleapis.com
+    models_endpoint: /v1beta/models
+    models_response_shape: gemini
+    config_files:
+      - ~/.gemini/antigravity-cli/settings.json
+      - ~/.gemini/config/config.json
+      - ~/.gemini/settings.json
+    env_model_variables: [ANTIGRAVITY_MODEL, GEMINI_MODEL]
+    execute_template:
+      - agy
+      - -p
+      - "{prompt}"
+      - --output-format
+      - json
+      - --model
+      - "{model}"
+      - --effort
+      - "{effort}"
+    skill_injection: native
+    extra:
+      sdk_module: google.antigravity
+      sdk_enabled: true
+
+  zcode:
+    enabled: true
+    display_name: ZCode
+    binary: zcode
+    binary_paths:
+      - ~/.local/bin/zcode
+      - /opt/homebrew/bin/zcode
+      - /usr/local/bin/zcode
+    binary_aliases: []
+    version_args: ["--version"]
+    auto_approve: true
+    model_list_args: []
+    auth_style: bearer
+    base_url_env: [ZCODE_BASE_URL]
+    api_key_env: [ZCODE_API_KEY]
+    default_base_url: ""
+    models_endpoint: /v1/models
+    models_response_shape: openai
+    config_files:
+      - ~/.zcode/v2/config.json
+      - ~/.zcode/v2/provider_config.json
+      - ~/.zcode/v2/setting.json
+      - ~/.zcode/config.yaml
+      - ~/.zcode/settings.json
+      - ~/.config/zcode/config.json
+    env_model_variables: [ZCODE_MODEL]
+    execute_template:
+      - zcode
+      - -p
+      - "{prompt}"
+      - --cwd
+      - "{workdir}"
+      - --json
+    skill_injection: mixed
+    extra:
+      macos_electron_bin: /Applications/ZCode.app/Contents/MacOS/ZCode
+      macos_cjs_entry: /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs
+      macos_builtin_provider_config: /Applications/ZCode.app/Contents/Resources/config/provider/zcode-builtin.json
+      supports_mcp_flag: false

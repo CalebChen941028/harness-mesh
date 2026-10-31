@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harness-mesh"
+version = "0.2.0"
+description = "Federated cross-harness scheduling mesh with ticket/assignment failover, dynamic model discovery and quota recovery."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Harness-Mesh Contributors" }]
+keywords = ["mcp", "multi-agent", "orchestration", "claude-code", "codex", "deepseek", "antigravity", "zcode"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "mcp>=1.2.0,<2",
+    "pydantic>=2.6.0",
+    "pyyaml>=6.0",
+    "httpx>=0.27.0",
+    "typer>=0.12.0",
+]
+
+[project.optional-dependencies]
+antigravity = ["google-antigravity>=0.1.0"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/CalebChen941028/harness-mesh"
+Repository = "https://github.com/CalebChen941028/harness-mesh"
+Issues = "https://github.com/CalebChen941028/harness-mesh/issues"
+
+[project.scripts]
+hmesh = "harness_mesh.cli:app"
+hmesh-mcp = "harness_mesh.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = [
+    "ignore::DeprecationWarning:typer.*",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
