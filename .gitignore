@@ -1,0 +1,17 @@
+.venv/
+.harness-mesh/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.DS_Store
+.ruff_cache/
+.mimosa/
+.agent-boost/
+.env
+.env.*
+*.log
+PROMPT_DEEPSEEK.md
+SPEC.md

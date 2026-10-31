@@ -1,0 +1,9 @@
+include LICENSE
+include CHANGELOG.md
+include README.md
+include README.zh-CN.md
+include SECURITY.md
+include CONTRIBUTING.md
+include CODE_OF_CONDUCT.md
+recursive-include config *.yaml
+recursive-include tests *.py
