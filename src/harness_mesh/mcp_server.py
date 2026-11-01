@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import fnmatch
 import os
 from typing import Any
 
@@ -21,6 +20,7 @@ from .lineage import (
     _task_id_from_cwd,
     _workspace_from_cwd,
 )
+from .market import filter_market_models
 from .models import (
     ContinuationCheckpoint,
     QuotaExhaustedPolicy,
@@ -118,22 +118,7 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
         """
 
         catalog = router.market.catalog()
-        pattern = (query or "").strip().lower()
-        models = list(catalog.models)
-        if pattern:
-            if any(character in pattern for character in "*?["):
-                models = [
-                    model
-                    for model in models
-                    if fnmatch.fnmatchcase(model.key.lower(), pattern)
-                    or fnmatch.fnmatchcase(model.name.lower(), pattern)
-                ]
-            else:
-                models = [
-                    model
-                    for model in models
-                    if pattern in model.key.lower() or pattern in model.name.lower()
-                ]
+        models = filter_market_models(catalog.models, query)
         cap = max(1, min(int(limit), 500))
         return {
             "models": [model.model_dump(mode="json") for model in models[:cap]],

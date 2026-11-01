@@ -192,6 +192,9 @@ def _market_doctor_report(config, workspace: str) -> dict[str, Any]:
         report["sources"] = list(catalog.sources)
         report["last_refresh"] = catalog.fetched_at
         report["stale"] = bool(catalog.stale)
+        if not catalog.models:
+            report["note"] = "no market data cached; run `hmesh market refresh`"
+            return report
         discovered = [
             model
             for model in store.list_discovered_models()
