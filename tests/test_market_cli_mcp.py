@@ -200,6 +200,153 @@ def test_market_show_unmatched_lists_only_real_models(tmp_path, monkeypatch):
         mesh.storage.close()
 
 
+def test_market_show_unmatched_only_prints_the_unmatched_models(tmp_path, monkeypatch):
+    mesh = make_mesh(tmp_path)
+    _seed_market(
+        mesh,
+        [
+            _model("anthropic/claude-opus-5-5"),
+            _model("zai/glm-5-3"),
+            _model("openai/gpt-6-astra"),
+        ],
+    )
+    _seed_models(
+        mesh,
+        [
+            _discovered("claude_code", "claude-opus-5-5"),
+            _discovered("zcode", "glm-5.3"),
+            _discovered("codex", "gpt-6-astra"),
+            _discovered("zcode", "kimi-k2.6"),
+            _discovered("zcode", "minimax-m3"),
+        ],
+    )
+    try:
+        text = _plain(
+            _invoke(
+                monkeypatch,
+                lambda: make_mesh(tmp_path),
+                "market",
+                "show",
+                "--unmatched",
+            ).output
+        )
+        lines = text.strip().splitlines()
+        # Two unmatched harness models plus the attribution, not 1582 rows.
+        assert len(lines) == 3, lines
+        assert "kimi-k2.6" in text
+        assert "minimax-m3" in text
+        assert "anthropic/claude-opus-5-5" not in text
+        assert "zai/glm-5-3" not in text
+        assert "openai/gpt-6-astra" not in text
+        assert lines[-1].startswith("Benchmark data: Epoch AI")
+    finally:
+        mesh.storage.close()
+
+
+def test_market_show_unmatched_with_a_model_filter_prints_both(tmp_path, monkeypatch):
+    mesh = make_mesh(tmp_path)
+    _seed_market(
+        mesh,
+        [
+            _model("anthropic/claude-opus-5-5"),
+            _model("zai/glm-5-3"),
+        ],
+    )
+    _seed_models(
+        mesh,
+        [
+            _discovered("claude_code", "claude-opus-5-5"),
+            _discovered("zcode", "kimi-k2.6"),
+        ],
+    )
+    try:
+        text = _plain(
+            _invoke(
+                monkeypatch,
+                lambda: make_mesh(tmp_path),
+                "market",
+                "show",
+                "--model",
+                "anthropic/*",
+                "--unmatched",
+            ).output
+        )
+        assert "anthropic/claude-opus-5-5" in text
+        assert "zai/glm-5-3" not in text
+        assert "unmatched zcode" in text
+        assert "kimi-k2.6" in text
+    finally:
+        mesh.storage.close()
+
+
+def test_market_show_unmatched_reports_an_empty_list(tmp_path, monkeypatch):
+    mesh = make_mesh(tmp_path)
+    _seed_market(mesh, [_model("anthropic/claude-opus-5-5")])
+    _seed_models(mesh, [_discovered("claude_code", "claude-opus-5-5")])
+    try:
+        text = _plain(
+            _invoke(
+                monkeypatch,
+                lambda: make_mesh(tmp_path),
+                "market",
+                "show",
+                "--unmatched",
+            ).output
+        )
+        assert "No unmatched harness models." in text
+        assert "anthropic/claude-opus-5-5" not in text
+    finally:
+        mesh.storage.close()
+
+
+def test_market_show_unmatched_json_keeps_the_full_structure(tmp_path, monkeypatch):
+    mesh = make_mesh(tmp_path)
+    _seed_market(
+        mesh,
+        [
+            _model("anthropic/claude-opus-5-5"),
+            _model("zai/glm-5-3"),
+        ],
+    )
+    _seed_models(
+        mesh,
+        [
+            _discovered("claude_code", "claude-opus-5-5"),
+            _discovered("zcode", "kimi-k2.6"),
+        ],
+    )
+    try:
+        payload = json.loads(
+            _plain(
+                _invoke(
+                    monkeypatch,
+                    lambda: make_mesh(tmp_path),
+                    "market",
+                    "show",
+                    "--unmatched",
+                    "--json",
+                ).output
+            )
+        )
+        assert {item["key"] for item in payload["models"]} == {
+            "anthropic/claude-opus-5-5",
+            "zai/glm-5-3",
+        }
+        assert payload["matched"] == 2
+        assert payload["unmatched"] == [
+            {
+                "harness": "zcode",
+                "model_id": "kimi-k2.6",
+                "effort_variant": "",
+                "confidence": "none",
+            }
+        ]
+        assert payload["attribution"].startswith("Benchmark data: Epoch AI")
+    finally:
+        mesh.storage.close()
+
+
+
 def test_market_refresh_writes_a_snapshot_and_reports_sources(tmp_path, monkeypatch):
     mesh = make_mesh(tmp_path)
     provider = _FakeProvider([_model("vendor/refreshed", input_price=0.5, output_price=1.5)])

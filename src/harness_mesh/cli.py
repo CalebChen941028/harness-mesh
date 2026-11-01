@@ -903,26 +903,29 @@ def market_show(
     if json_output:
         typer.echo(_json(payload))
         return
-    if catalog_empty:
-        typer.echo("No market data is cached. Run `hmesh market refresh`.")
-    elif model and not rows:
-        typer.echo(f"no model matches {model}")
-    for item in rows:
-        axis_column = ""
-        if axis_name is not None:
-            value = getattr(item, f"intelligence_{axis_name}")
-            axis_column = f" {axis_name}={value if value is not None else '-':>5}"
-        typer.echo(
-            f"{item.key:48} in={_price(item.input_per_mtok):>8} "
-            f"out={_price(item.output_per_mtok):>8} "
-            f"intel={item.intelligence if item.intelligence is not None else '-':>5} "
-            f"source={item.intelligence_source or '-'} "
-            f"bench={len(item.benchmarks_used)} "
-            f"data={item.benchmark_data_date or '-'} "
-            f"ctx={item.context_window or '-'}{axis_column}"
-        )
-    if payload["stale"]:
-        typer.echo("cache is stale; refresh it when the network is available")
+    # ``--unmatched`` alone is a report about harness models, not a dump of the
+    # whole catalogue.  A model filter still shows both by request.
+    if not unmatched or model:
+        if catalog_empty:
+            typer.echo("No market data is cached. Run `hmesh market refresh`.")
+        elif model and not rows:
+            typer.echo(f"no model matches {model}")
+        for item in rows:
+            axis_column = ""
+            if axis_name is not None:
+                value = getattr(item, f"intelligence_{axis_name}")
+                axis_column = f" {axis_name}={value if value is not None else '-':>5}"
+            typer.echo(
+                f"{item.key:48} in={_price(item.input_per_mtok):>8} "
+                f"out={_price(item.output_per_mtok):>8} "
+                f"intel={item.intelligence if item.intelligence is not None else '-':>5} "
+                f"source={item.intelligence_source or '-'} "
+                f"bench={len(item.benchmarks_used)} "
+                f"data={item.benchmark_data_date or '-'} "
+                f"ctx={item.context_window or '-'}{axis_column}"
+            )
+        if payload["stale"]:
+            typer.echo("cache is stale; refresh it when the network is available")
     if unmatched:
         entries = payload["unmatched"]
         if ledger_hint:
