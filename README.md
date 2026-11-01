@@ -10,7 +10,7 @@ Harness-Mesh is a **local orchestration layer**, shipped as:
 
 - a Python package (`harness_mesh`) with a typed data model and SQLite ledger;
 - a CLI, `hmesh`, for status, model discovery, dispatch, context and patches;
-- an stdio MCP server, `hmesh-mcp`, exposing 15 tools to a controller harness;
+- an stdio MCP server, `hmesh-mcp`, exposing 18 tools to a controller harness;
 - a local runtime directory, `.harness-mesh/`, holding state, worktrees and paged resources.
 
 It does not provide a model, a hosted service, a web UI or a multi-user scheduler. It orchestrates the harness CLIs you already have installed and authenticated on the machine. Prompts and code are sent to those CLIs; the mesh process itself keeps a local ledger and bounded summaries.
@@ -83,7 +83,7 @@ Useful options:
 ```bash
 hmesh install --dry-run                 # print planned commands/files, change nothing
 hmesh install --yes                     # non-interactive install
-hmesh install --approve read            # pre-approve 9 read-only MCP tools
+hmesh install --approve read            # pre-approve 11 read-only MCP tools
 hmesh install --harness zcode           # one harness only (repeatable)
 hmesh install --workspace /path/project # pin the MCP workspace explicitly
 hmesh install --uninstall               # remove integrations
@@ -96,13 +96,13 @@ Without `--dry-run`, `hmesh install` prints the planned files and commands and a
 Interactive sessions ask before an MCP tool runs. Headless commands such as `codex exec` and `agy -p` cannot answer that prompt, so `hmesh install` writes per-tool allow rules:
 
 ```bash
-hmesh install --approve dispatch   # default: 12 read and dispatch tools
-hmesh install --approve read       # 9 read-only tools
-hmesh install --approve all        # all 15 tools
+hmesh install --approve dispatch   # default: 14 read and dispatch tools
+hmesh install --approve read       # 11 read-only tools
+hmesh install --approve all        # all 18 tools
 hmesh install --approve none       # write nothing and remove rules written by hmesh
 ```
 
-`dispatch`, the default, approves the nine read tools plus `dispatch_task`, `parallel_dispatch` and `cancel_task`. Dispatched work runs in an isolated worktree; its changes reach the primary checkout only through `apply_task_patch`. The three write tools stay manual: `apply_task_patch`, `report_quota_status` and `update_project_context` change the primary workspace or shared state. Pass `--approve all` to pre-approve them too.
+`dispatch`, the default, approves the eleven read tools plus `dispatch_task`, `parallel_dispatch` and `cancel_task`. Dispatched work runs in an isolated worktree; its changes reach the primary checkout only through `apply_task_patch`. The four write tools stay manual: `apply_task_patch`, `report_quota_status`, `update_project_context` and `install_integration` change the primary workspace, shared state or another application's configuration. Pass `--approve all` to pre-approve them too.
 
 | Harness | File | Rule |
 | :--- | :--- | :--- |
@@ -118,6 +118,22 @@ Headless runs cannot answer approval prompts. Measured on the real harnesses (20
 ZCode's `--scope project` still records the marketplace and plugin in the global state files `~/.zcode/cli/plugins/known_marketplaces.json` and `installed_plugins.json`, even though the plugin and its cache are project-scoped. `hmesh install --uninstall` removes both entries; the matching `zcode plugins uninstall` and `zcode plugins marketplace remove` commands do the same by hand.
 
 Restart the desktop application after installation and start a new chat/task. Existing chats may keep a cached tool list. The installer is idempotent; editing an existing DSH entry or re-adding an MCP server replaces the previous registration rather than duplicating it.
+
+### When another harness arrives later
+
+Claude Code and Codex are often installed first; ZCode or another supported harness may follow. The two roles need different handling.
+
+**Worker.** No action. Dispatch re-resolves the binary for every assignment and routing re-checks adapter runnability, so the next ticket can use the new harness. Only the model inventory is cached, for five minutes.
+
+**Controller.** The harness must have the Mesh MCP server or plugin registered before it can call these tools. Mesh reports the gap and leaves the decision to you:
+
+- `hmesh integrations` lists every configured harness as `integrated`, `detected_not_integrated`, `stale` (registered but the command no longer runs), `not_detected` or `ignored`.
+- `hmesh doctor` and `hmesh status` end with one line naming the detected harness and the install command.
+- Inside a controller conversation, `list_harnesses` adds `integration_hints`. The agent explains the hint, calls `plan_integration` to show the files, approval entries and commands, and calls `install_integration` only after you agree.
+
+`plan_integration` returns a `plan_id`: the first 16 hex characters of a SHA-256 over the normalised plan and the current content of the target files. `install_integration` recomputes the plan and refuses any id that no longer matches, so editing a config file between review and install forces a new review. It is a `write` tool; the default `dispatch` level leaves it for manual approval. Workers are refused through the same lineage resolution as nested dispatch, `HARNESS_MESH_READ_ONLY=1` blocks it, and the target harness must restart before its tool list appears.
+
+`hmesh integrations ignore zcode` stops the reminder and `unignore` restores it. The command writes only `integration.ignore` in the Mesh config; it never edits another application's configuration.
 
 ## Quick start
 
@@ -292,7 +308,7 @@ Every result carries a `routing` object: mode, task kind, tier, chosen harness/m
 
 The Aider polyglot leaderboard has no data after 2025-10. The community LMArena snapshot (`oolong-tea-2026/arena-ai-leaderboards`) has returned empty `leaderboards` every day since 2026-10-20. `api.llm-stats.com` returns vendor-reported scores marked `verified: false`, only four models carry an AA-Index, and its terms page returns 404. None of the three is used.
 
-## MCP tools (15)
+## MCP tools (18)
 
 | Tool | Purpose |
 | :--- | :--- |
@@ -306,6 +322,9 @@ The Aider polyglot leaderboard has no data after 2025-10. The community LMArena 
 | `get_task_status` | Ticket status plus assignments and failover history |
 | `read_task_resource` | Page through `diff`, `transcript` or `assignments` |
 | `get_quota_status` | Circuits, waiting queue; `probe_now` probes and resumes |
+| `get_integration_status` | Five-state integration report for every enabled harness; read-only |
+| `plan_integration` | Reviewable install plan and `plan_id`; writes nothing |
+| `install_integration` | Write tool: installs only when `plan_id` still matches; workers and read-only mode are refused |
 | `report_quota_status` | Manual `reset`, `open` or `half_open` |
 | `apply_task_patch` | Apply a completed isolated worktree to the primary workspace with `patch` or `merge` (copy stays CLI-only) |
 | `cancel_task` | Cancel a running or waiting ticket; child processes are killed |
@@ -318,6 +337,8 @@ The Aider polyglot leaderboard has no data after 2025-10. The community LMArena 
 hmesh install [--dry-run] [--yes] [--approve LEVEL] [--harness H]... [--uninstall]
 hmesh doctor [--harness H] [--json]
 hmesh status [--refresh] [--json]
+hmesh integrations [--json]
+hmesh integrations ignore|unignore NAME [--json]
 hmesh models [--refresh] [--harness H]
 hmesh quota [--probe]
 hmesh route --objective O [--kind K] [--difficulty D] [--harness H] [--json]
@@ -372,6 +393,7 @@ Key settings:
 | `routing.premium_hints` / `routing.value_hints` | `[]` | Model globs weighted per tier |
 | `routing.strict_hints` | `false` | Turn hint weighting into a filter |
 | `routing.pins` | `{}` | Fixed harness/model per task kind |
+| `integration.ignore` | `[]` | Harness names whose integration hints are suppressed |
 
 ## Testing
 

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Integration discovery for harnesses installed after the mesh. `hmesh integrations [--json]` reports `integrated`, `detected_not_integrated`, `stale`, `not_detected` and `ignored`; `hmesh doctor` and `hmesh status` end with the next command, and `list_harnesses` returns `integration_hints`. `plan_integration` returns the exact files, approval entries and commands with a `plan_id` over the plan and the current target files. `install_integration` is a write tool that recomputes the plan, refuses a stale id, refuses workers through lineage resolution and refuses `HARNESS_MESH_READ_ONLY=1`. `integration.ignore` and `hmesh integrations ignore|unignore` suppress reminders. Detection runs only inside these calls, starts no process and writes no file.
 - Epoch AI "Capabilities & benchmarking" as a fourth, keyless market source (`epoch.ai/data/benchmark_data.zip`, CC BY 4.0). The archive is read with `zipfile`, only for the configured benchmark CSVs, with a 25 MB response cap, an 80 MB expanded cap, `..`/absolute-path rejection and same-host redirects. Each benchmark yields a percentile inside a 540-day reference window; the reasoning and coding axes are averaged, an axis with fewer than three scored benchmarks stays empty, and `intelligence_source` gains `epoch_ai`. The default cache lifetime is twelve hours. `hmesh market show` prints the required attribution and every routing decision carries it in `attribution`.
 - `routing.axis_weights`: `plan`/`audit`/`review` score reasoning 0.7 / coding 0.3, `implement`/`refactor`/`debug`/`test` score coding 0.7 / reasoning 0.3, `docs` scores reasoning 1.0. A model with one axis uses that axis at full weight. Routing decisions now record `axis_scores` and `benchmarks_used`.
 - `hmesh market show --axis reasoning|coding` sorts by and displays one axis, plus the benchmark count, benchmark data date and `intelligence_source`.
@@ -28,13 +29,13 @@
 - Task-kind routing (`plan`, `audit`, `review`, `implement`, `refactor`, `debug`, `test`, `docs`, `auto`) with `premium`, `balanced` and `value` tiers, configurable value floors, model pins and soft or strict premium/value hints. Requests can set `task_kind`, `routing_mode`, `max_price_per_mtok` and `min_intelligence`; `HARNESS_MESH_ROUTING` overrides the configured mode.
 - `hmesh market refresh`, `hmesh market show [--unmatched]`, `hmesh route`, `--kind` and `--routing-mode` on `hmesh dispatch`, plus the `get_model_market` and `preview_routing` MCP tools. Every task result carries a `routing` record and the transcript starts with the same block.
 - Background market refresh on MCP server start and on the cache TTL. Failures log a warning and leave dispatch unchanged.
-- `hmesh install --approve {read,dispatch,all,none}` (default `dispatch`) writes per-tool MCP pre-approvals for Claude Code (`~/.claude/settings.json`), Codex (`~/.codex/config.toml`) and Antigravity (`~/.gemini/config/config.json`). `read` covers the nine read tools, `dispatch` adds the three dispatch tools, `all` covers all fifteen, and `none` writes nothing while removing rules written by this tool. ZCode and DeepSeek Harness need no approval settings.
+- `hmesh install --approve {read,dispatch,all,none}` (default `dispatch`) writes per-tool MCP pre-approvals for Claude Code (`~/.claude/settings.json`), Codex (`~/.codex/config.toml`) and Antigravity (`~/.gemini/config/config.json`). `read` covers the eleven read tools, `dispatch` adds the three dispatch tools, `all` covers all eighteen, and `none` writes nothing while removing rules written by this tool. ZCode and DeepSeek Harness need no approval settings.
 - `hmesh doctor` reports approved and missing tools against the default `dispatch` level without changing files.
 
 ### Changed
 
 - The install epilogue states the level and number of pre-approved tools instead of printing the old service-wide Codex and Antigravity hint.
-- MCP now exposes 15 tools: 9 read, 3 dispatch and 3 write. `hmesh install --approve read` writes 9 rules, the default `dispatch` level 12, and `all` 15.
+- MCP now exposes 18 tools: 11 read, 3 dispatch and 4 write. `hmesh install --approve read` writes 11 rules, the default `dispatch` level 14, and `all` 18.
 
 ## 0.3.1 — 2026-11-01
 

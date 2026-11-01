@@ -49,6 +49,11 @@ failover_priority:
   - antigravity
   - zcode
 
+# Integration discovery. Ignored harnesses still report their state but do not
+# add actionable hints to list_harnesses, hmesh doctor or hmesh status.
+integration:
+  ignore: []
+
 # ---------------------------------------------------------------------------
 # Model market (read-only)
 #

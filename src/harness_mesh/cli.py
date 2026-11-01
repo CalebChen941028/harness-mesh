@@ -11,9 +11,15 @@ from pathlib import Path
 from typing import Any, Optional
 
 import typer
+import yaml
 
 from .approvals import APPROVAL_LEVELS, DEFAULT_APPROVAL_LEVEL
-from .config import find_config_path, load_config
+from .config import (
+    find_config_path,
+    integration_config_path,
+    load_config,
+    update_integration_ignore,
+)
 from .installer import NO_APPROVAL_DETAIL, HarnessInstaller
 from .lineage import (
     _effective_call_depth,
@@ -241,6 +247,32 @@ def _echo_market_doctor(report: dict[str, Any]) -> None:
     )
 
 
+def _integration_hint_line(statuses) -> str | None:
+    actionable = [
+        status for status in statuses if status.status == "detected_not_integrated"
+    ]
+    if not actionable:
+        return None
+    names = ", ".join(status.display_name for status in actionable)
+    flags = " ".join(f"--harness {status.harness}" for status in actionable)
+    verb = "is" if len(actionable) == 1 else "are"
+    return (
+        f"integration: {names} {verb} installed but harness-mesh is not "
+        f"registered; run `hmesh install {flags}`"
+    )
+
+
+def _echo_integration_hint(config, workspace: str, config_path: str | None) -> None:
+    installer = HarnessInstaller(
+        config,
+        workspace,
+        config_path=config_path or find_config_path(workspace),
+    )
+    line = _integration_hint_line(installer.integration_status())
+    if line:
+        typer.echo(line)
+
+
 def _echo_install_results(results) -> None:
     for result in results:
         typer.echo(f"{result.harness:12} {result.action:12} {result.detail}")
@@ -336,6 +368,79 @@ def install(
 
 
 @app.command()
+def integrations(
+    ctx: typer.Context,
+    action: Optional[str] = typer.Argument(
+        None, help="List by default; `ignore` or `unignore` one harness."
+    ),
+    name: Optional[str] = typer.Argument(None, help="Harness name for ignore/unignore."),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Show which installed harnesses can reach Mesh, and maintain ignore rules."""
+
+    options = ctx.obj or {}
+    workspace = options.get("workspace") or _workspace_from_cwd()
+    config_path = options.get("config") or os.environ.get("HARNESS_MESH_CONFIG")
+    config = load_config(config_path, workspace)
+    if action is None:
+        installer = HarnessInstaller(
+            config,
+            workspace,
+            config_path=config_path or find_config_path(workspace),
+        )
+        statuses = installer.integration_status()
+        if json_output:
+            typer.echo(_json({"harnesses": [status.as_dict() for status in statuses]}))
+            return
+        for status in statuses:
+            typer.echo(f"{status.harness:14} {status.status:24} {status.detail}")
+        return
+    if action not in {"ignore", "unignore"}:
+        raise typer.BadParameter(
+            "expected `ignore NAME` or `unignore NAME`", param_hint="ACTION"
+        )
+    if not name:
+        raise typer.BadParameter(
+            "NAME is required for ignore and unignore", param_hint="NAME"
+        )
+    if name not in config.harnesses:
+        raise typer.BadParameter(
+            f"unknown harness {name!r}; expected one of: "
+            + ", ".join(config.enabled_harnesses()),
+            param_hint="NAME",
+        )
+    target = integration_config_path(workspace, config_path)
+    seed: Path | None = None
+    if not target.exists():
+        found = find_config_path(workspace)
+        if found is not None and found.resolve() != target.resolve():
+            seed = found
+    try:
+        written = update_integration_ignore(
+            target,
+            name,
+            ignored=action == "ignore",
+            seed_path=seed,
+        )
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        typer.echo(f"Cannot update {target}: {exc}", err=True)
+        raise typer.Exit(code=1)
+    if json_output:
+        typer.echo(
+            _json(
+                {
+                    "harness": name,
+                    "ignored": action == "ignore",
+                    "config_path": str(written),
+                }
+            )
+        )
+        return
+    verb = "ignored" if action == "ignore" else "no longer ignoring"
+    typer.echo(f"{verb} {name} in {written}")
+
+
+@app.command()
 def doctor(
     ctx: typer.Context,
     harness: Optional[list[str]] = typer.Option(
@@ -396,6 +501,9 @@ def doctor(
             ]
         )
         typer.echo(f"{len(installed)} of {total} harnesses installed")
+        _echo_integration_hint(
+            config, workspace, config_path or find_config_path(workspace)
+        )
     if any(result.status == "failed" for result in results):
         raise typer.Exit(code=1)
 
@@ -439,6 +547,11 @@ def status(
             )
         if item.tier_models:
             typer.echo("  tiers : " + ", ".join(f"{tier}={model}" for tier, model in item.tier_models.items()))
+    _echo_integration_hint(
+        runtime.config,
+        str(runtime.router.workspace_root),
+        (ctx.obj or {}).get("config") or find_config_path(runtime.router.workspace_root),
+    )
 
 
 @app.command()

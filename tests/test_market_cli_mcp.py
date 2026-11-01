@@ -489,14 +489,14 @@ def _tool_payload(result):
 
 
 @pytest.mark.asyncio
-async def test_mcp_exposes_fifteen_tools_with_market_and_routing(tmp_path):
+async def test_mcp_exposes_eighteen_tools_with_market_and_routing(tmp_path):
     mesh = make_mesh(tmp_path)
     try:
         server = create_server(mesh.router)
         tools = await server.list_tools()
         names = {tool.name for tool in tools}
         assert names == set(TOOL_NAMES)
-        assert len(names) == 15
+        assert len(names) == 18
         assert {"get_model_market", "preview_routing"} <= names
 
         by_name = {tool.name: tool for tool in tools}

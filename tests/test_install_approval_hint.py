@@ -51,7 +51,7 @@ def test_install_prints_the_approval_summary(tmp_path):
     result = _invoke(tmp_path, "--yes")
     assert result.exit_code == 0, result.output
     output = _plain(result.output)
-    assert "Approved 12 tools" in output
+    assert "Approved 14 tools" in output
     assert "apply_task_patch" in output
     assert "--approve all" in output
     assert "default_tools_approval_mode" not in output
@@ -63,12 +63,12 @@ def test_install_none_reports_that_nothing_was_approved(tmp_path):
     assert result.exit_code == 0, result.output
     output = _plain(result.output)
     assert "No MCP tools were pre-approved" in output
-    assert "Approved 12 tools" not in output
+    assert "Approved 14 tools" not in output
 
 
 def test_uninstall_and_dry_run_do_not_print_the_final_summary(tmp_path):
     dry = _plain(_invoke(tmp_path, "--dry-run").output)
-    assert "Approved 12 tools" not in dry
-    assert "approvals: level=dispatch tools=12 status=planned" in dry
+    assert "Approved 14 tools" not in dry
+    assert "approvals: level=dispatch tools=14 status=planned" in dry
     removed = _plain(_invoke(tmp_path, "--yes", "--uninstall").output)
-    assert "Approved 12 tools" not in removed
+    assert "Approved 14 tools" not in removed

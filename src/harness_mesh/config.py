@@ -8,6 +8,8 @@ import os
 import re
 import shlex
 import shutil
+import stat
+import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -97,6 +99,7 @@ def resolve_harness_binary(
     home_dir: str | Path | None = None,
     *,
     allow_system_paths: bool | None = None,
+    create_shim: bool = True,
 ) -> str | None:
     """Resolve a harness binary from PATH, configured macOS bundle paths and shims.
 
@@ -155,6 +158,11 @@ def resolve_harness_binary(
                 )
             )
             shim = Path(state_dir).expanduser() / "bin" / "zcode"
+            if not create_shim:
+                # Planning and status checks must not create files; reporting
+                # the deterministic shim path keeps the plan identical to the
+                # install that follows.
+                return str(shim)
             try:
                 shim.parent.mkdir(parents=True, exist_ok=True)
                 shim.write_text(
@@ -288,6 +296,16 @@ class RoutingConfig(BaseModel):
     pins: dict[str, RoutingPinConfig] = Field(default_factory=dict)
 
 
+class IntegrationConfig(BaseModel):
+    """Discovery preferences for registering Mesh into other harnesses."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    # Harnesses whose integration hints are suppressed.  Detection still
+    # reports the underlying facts under ``ignored``.
+    ignore: list[str] = Field(default_factory=list)
+
+
 class MeshConfig(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
@@ -330,6 +348,7 @@ class MeshConfig(BaseModel):
     plugin_roots: list[str] = Field(default_factory=list)
     market: MarketConfig = Field(default_factory=MarketConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
+    integration: IntegrationConfig = Field(default_factory=IntegrationConfig)
     harnesses: dict[str, HarnessConfig] = Field(default_factory=dict)
 
     def enabled_harnesses(self) -> list[str]:
@@ -618,6 +637,121 @@ def find_config_path(workspace_root: str | Path | None = None) -> Path | None:
         if candidate.exists():
             return candidate
     return None
+
+
+def integration_config_path(
+    workspace_root: str | Path, config_path: str | Path | None = None
+) -> Path:
+    """Where ``integration.ignore`` is written, without touching app configs.
+
+    An explicit ``--config`` (or ``HARNESS_MESH_CONFIG``) wins because that is
+    the file the loader will read next.  Otherwise the workspace Mesh config
+    is preferred; when the loader fell back to a workspace config that is not
+    this file, that file is updated in place so its other settings survive.
+    """
+
+    if config_path is not None:
+        return Path(config_path).expanduser()
+    root = Path(workspace_root).resolve()
+    workspace_config = root / ".harness-mesh" / "config.yaml"
+    if workspace_config.exists():
+        return workspace_config
+    found = find_config_path(root)
+    if found is not None:
+        found = found.expanduser()
+        try:
+            found.resolve().relative_to(root)
+        except (OSError, ValueError):
+            return workspace_config
+        if found.name != "harnesses.example.yaml":
+            return found
+    return workspace_config
+
+
+def atomic_write_text(path: str | Path, content: str) -> None:
+    """Replace ``path`` atomically, preserving its existing mode."""
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else None
+    handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=str(target.parent),
+        prefix=f".{target.name}.",
+        delete=False,
+    )
+    try:
+        with handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(handle.name, mode)
+        os.replace(handle.name, target)
+    except OSError:
+        try:
+            os.unlink(handle.name)
+        except OSError:
+            pass
+        raise
+
+
+def update_integration_ignore(
+    path: str | Path,
+    harness: str,
+    *,
+    ignored: bool,
+    seed_path: str | Path | None = None,
+) -> Path:
+    """Add or remove one harness in ``integration.ignore`` atomically.
+
+    ``seed_path`` supplies the current effective configuration when the target
+    file does not exist yet (for example the shipped example template), so
+    creating the workspace config does not silently drop its settings.
+    """
+
+    target = Path(path)
+    raw: dict[str, Any]
+    source: Path | None = None
+    if target.exists():
+        source = target
+    elif seed_path is not None:
+        source = Path(seed_path)
+    if source is not None and source.exists():
+        parsed = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+        if not isinstance(parsed, dict):
+            raise ValueError(f"harness-mesh config must be a mapping: {source}")
+        raw = dict(parsed)
+    else:
+        raw = {}
+    integration = raw.get("integration")
+    if integration is None:
+        integration = {}
+    if not isinstance(integration, dict):
+        raise ValueError("integration must be a mapping")
+    current = integration.get("ignore", [])
+    if current is None:
+        current = []
+    if not isinstance(current, list):
+        raise ValueError("integration.ignore must be a list")
+    names = [str(name) for name in current]
+    if ignored:
+        if harness not in names:
+            names.append(harness)
+    else:
+        names = [name for name in names if name != harness]
+    if names:
+        integration["ignore"] = names
+    else:
+        integration.pop("ignore", None)
+    if integration:
+        raw["integration"] = integration
+    else:
+        raw.pop("integration", None)
+    text = yaml.safe_dump(raw, sort_keys=False, allow_unicode=True)
+    atomic_write_text(target, text)
+    return target
 
 
 def load_config(path: str | Path | None = None, workspace_root: str | Path | None = None) -> MeshConfig:
