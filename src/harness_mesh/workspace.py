@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -14,7 +15,9 @@ from typing import Any, Iterable, Mapping
 
 from .config import cap_text
 from .models import ContinuationCheckpoint, TaskRequest, utc_now
-from .security import SENSITIVE_FILE_PATTERNS, is_sensitive_name
+from .security import SENSITIVE_FILE_PATTERNS, is_sensitive_name, is_sensitive_path
+
+logger = logging.getLogger(__name__)
 
 
 class WorkspaceError(RuntimeError):
@@ -338,6 +341,32 @@ class WorkspaceManager:
         self._write_baseline_marker(info)
         return info
 
+    def _recreate_symlink(self, source: Path, destination: Path, source_root: Path) -> bool:
+        """Recreate an internal symlink, never copying its target's content."""
+
+        if not source.is_symlink() or not source.exists():
+            logger.warning("skipping symlink %s: dangling or missing target", source)
+            return False
+        try:
+            resolved = source.resolve()
+        except OSError:
+            logger.warning("skipping symlink %s: cannot resolve target", source)
+            return False
+        if is_sensitive_path(resolved):
+            logger.warning("skipping symlink %s: target name is sensitive", source)
+            return False
+        if not self._is_relative_to(resolved, source_root.resolve()):
+            logger.warning("skipping symlink %s: target escapes source workspace", source)
+            return False
+        link_target = os.readlink(source)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.is_symlink() or destination.exists():
+            if destination.is_dir() and not destination.is_symlink():
+                raise WorkspaceError(f"cannot replace directory with symlink: {destination}")
+            destination.unlink()
+        os.symlink(link_target, destination)
+        return True
+
     def _sync_uncommitted_changes(self, worktree_path: Path) -> None:
         """Copy the primary checkout's uncommitted state into a new worktree.
 
@@ -363,7 +392,9 @@ class WorkspaceManager:
                     continue
                 src = self.workspace_root / relative
                 dst = worktree_path / relative
-                if src.is_file():
+                if src.is_symlink():
+                    self._recreate_symlink(src, dst, self.workspace_root)
+                elif src.is_file():
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(src, dst)
                 elif not src.exists() and dst.exists():
@@ -378,7 +409,9 @@ class WorkspaceManager:
                 continue
             src = self.workspace_root / relative
             dst = worktree_path / relative
-            if src.is_file():
+            if src.is_symlink():
+                self._recreate_symlink(src, dst, self.workspace_root)
+            elif src.is_file():
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dst)
             elif not src.exists() and dst.exists():
@@ -662,8 +695,14 @@ class WorkspaceManager:
                 raise WorkspaceError(f"refusing unsafe worktree path: {relative}")
             if is_sensitive_name(rel_path.name):
                 continue
-            src = (source / rel_path).resolve()
-            dst = (target / rel_path).resolve()
+            src_path = source / rel_path
+            dst_path = target / rel_path
+            if src_path.is_symlink():
+                if self._recreate_symlink(src_path, dst_path, source):
+                    applied.append(relative)
+                continue
+            src = src_path.resolve()
+            dst = dst_path.resolve()
             if not self._is_relative_to(src, source.resolve()) or not self._is_relative_to(dst, target_resolved):
                 raise WorkspaceError(f"refusing path escaping workspace: {relative}")
             if src.is_file():
