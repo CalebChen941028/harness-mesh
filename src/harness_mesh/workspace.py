@@ -115,7 +115,20 @@ class WorkspaceManager:
         timeout: int = 120,
         input_text: str | None = None,
     ) -> subprocess.CompletedProcess:
-        command = [self.git_binary, "-c", "core.hooksPath=/dev/null", *args]
+        command = [
+            self.git_binary,
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.pager=cat",
+            "-c",
+            "diff.external=",
+            "-c",
+            "protocol.ext.allow=never",
+            *args,
+        ]
         try:
             process = subprocess.run(
                 command,
@@ -159,6 +172,8 @@ class WorkspaceManager:
             return {}
         config = common / "config"
         config_hash = self._hash_file(config) if config.exists() else None
+        attributes = common / "info" / "attributes"
+        attributes_hash = self._hash_file(attributes) if attributes.exists() else None
         hooks = common / "hooks"
         hook_hashes: dict[str, str] = {}
         if hooks.is_dir():
@@ -167,22 +182,26 @@ class WorkspaceManager:
                     digest = self._hash_file(entry)
                     if digest is not None:
                         hook_hashes[entry.relative_to(hooks).as_posix()] = digest
-        return {"config": config_hash, "hooks": hook_hashes}
+        return {"config": config_hash, "attributes": attributes_hash, "hooks": hook_hashes}
 
     def _git_guard_path(self, task_id: str) -> Path:
         safe = _SAFE_TASK_ID.sub("_", task_id)
         return self.git_guard_dir / f"{safe}.json"
 
     def _record_git_guard(self, task_id: str) -> None:
+        guard_path = self._git_guard_path(task_id)
+        if guard_path.exists():
+            return
         try:
             snapshot = self._git_metadata_snapshot()
             self.git_guard_dir.mkdir(parents=True, exist_ok=True)
             payload = {"task_id": task_id, "snapshot": snapshot}
-            self._git_guard_path(task_id).write_text(
-                json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
-            )
+            guard_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
         except OSError as exc:
             logger.warning("unable to record Git metadata guard for %s: %s", task_id, exc)
+
+    def verify_git_guard(self, task_id: str) -> None:
+        self._verify_git_guard(task_id)
 
     def _verify_git_guard(self, task_id: str) -> None:
         guard_path = self._git_guard_path(task_id)
@@ -199,6 +218,8 @@ class WorkspaceManager:
         changes: list[str] = []
         if saved.get("config") != current.get("config"):
             changes.append(".git/config changed")
+        if saved.get("attributes") != current.get("attributes"):
+            changes.append(".git/info/attributes changed")
         old_hooks = saved.get("hooks") or {}
         new_hooks = current.get("hooks") or {}
         for name in sorted(set(old_hooks) | set(new_hooks)):
@@ -689,10 +710,12 @@ class WorkspaceManager:
         excludes = sensitive_git_pathspecs()
         if stage_untracked:
             self._git(["add", "-N", "--", ".", *excludes], cwd=target)
-        result = self._git(["diff", ref, "--no-color", "--", ".", *excludes], cwd=target)
+        result = self._git(
+            ["diff", "--no-ext-diff", ref, "--no-color", "--", ".", *excludes], cwd=target
+        )
         if result.returncode != 0:
             # A repository without commits: show the staged/worktree diff instead.
-            result = self._git(["diff", "--no-color"], cwd=target)
+            result = self._git(["diff", "--no-ext-diff", "--no-color"], cwd=target)
         return result.stdout
 
     def diff_files(self, path: str | Path, *, base_ref: str | None = None) -> list[str]:
@@ -701,7 +724,8 @@ class WorkspaceManager:
             return []
         ref = base_ref or self.baseline_for_path(target) or "HEAD"
         result = self._git(
-            ["diff", "--name-only", ref, "--", ".", *sensitive_git_pathspecs()], cwd=target
+            ["diff", "--no-ext-diff", "--name-only", ref, "--", ".", *sensitive_git_pathspecs()],
+            cwd=target,
         )
         if result.returncode != 0:
             return []

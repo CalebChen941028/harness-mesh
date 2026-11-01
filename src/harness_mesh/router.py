@@ -498,6 +498,40 @@ class MeshRouter:
             outcome = self._normalize_outcome(raw_outcome)
             if outcome.duration_ms <= 0:
                 outcome.duration_ms = int((self.now_fn() - call_started) * 1000)
+            if worktree_path and mode in {WorkspaceMode.ISOLATED_WORKTREE, WorkspaceMode.READ_ONLY}:
+                try:
+                    ws.verify_git_guard(request.task_id)
+                except WorkspaceError:
+                    self.storage.update_assignment(
+                        assignment.assignment_id,
+                        status="ended_error",
+                        ended_at=utc_now(),
+                        error_reason="git_metadata_tampered",
+                        duration_ms=outcome.duration_ms,
+                        exit_code=outcome.exit_code,
+                    )
+                    return self._terminal_result(
+                        request,
+                        status=TaskStatus.FAILED,
+                        initial_harness=target,
+                        current_harness=current_harness,
+                        current_model=current_model,
+                        difficulty=difficulty,
+                        effort=effort,
+                        summary="Git metadata changed during the assignment; worktree retained for inspection.",
+                        error_detail="git_metadata_tampered",
+                        workdir=workdir,
+                        worktree_path=worktree_path,
+                        worktree_branch=worktree_branch,
+                        started=started,
+                        skills=[s.name for s in skills_selected],
+                        plugins=list(active_plugin_names),
+                        outcome=outcome,
+                        transcripts=transcripts,
+                        checkpoint=None,
+                        mode=mode,
+                        ws=ws,
+                    )
             existing_attempts += 1
             last_outcome = outcome
             transcripts.append(
