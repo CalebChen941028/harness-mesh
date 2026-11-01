@@ -239,7 +239,15 @@ Epoch AI 数据采用 CC BY 4.0，需要署名。`hmesh market show` 末尾固�
 
 `hmesh market refresh` 把快照写入 `.harness-mesh/state.db`。默认缓存 6 小时；Epoch AI 与 Artificial Analysis 至少缓存 12 小时，Artificial Analysis 每个进程每天最多请求 20 次。刷新失败保留旧快照并标记 stale；超过 7 天的缓存仍可用，同时标记 expired。
 
-`market.enabled: false` 或 `HARNESS_MESH_OFFLINE=1` 会关闭全部外发请求。派发只读缓存，来源变慢或不可达不会拖住工单。
+`market.enabled: false` 或 `HARNESS_MESH_OFFLINE=1` 会关闭全部外发请求。
+
+### 自动刷新
+
+缓存不需要手动维护。MCP 服务启动时若某个来源缺失或超过 TTL，会在后台刷新，之后按 TTL 周期刷新。第一次派发如果完全没有市场数据，最多等待 `market.wait_seconds`（8 秒），随后先用本地分档继续，刷新在后台完成。一次性命令（`dispatch`、`route`、`status`、`models`、`market show`）用同样的 8 秒上限同步刷新；来源变慢或失败时回落到旧快照或启发式，只记一条警告。
+
+控制端只发目标，不必点名模型。MCP 的 `dispatch_task` 与 `hmesh dispatch` 都把 `target_harness` 默认成 `auto`，由 Mesh 在所有已安装的 Harness 之间路由并选模型。MCP 的 `initialize` 响应会把这条规则告诉每个客户端。显式传入 `model` 或 `target_harness` 时行为不变。
+
+市场分数同时驱动模型发现：Harness 模型匹配到目录后，`capability_score`、`assigned_tiers` 与分档映射改用市场智能分，没有匹配时保持原启发式。`hmesh models`、`hmesh status` 与 `list_harnesses` 会显示每个模型的 `intelligence`、`intelligence_source` 与混合价格，因此用户看到的分档、派发选中的模型和路由预览保持一致。`hmesh doctor` 增加只读的 `market` 一行：数据来源、最近一次成功刷新、是否过期、匹配率与未匹配模型。
 
 ### 任务类型与档位
 
@@ -291,7 +299,7 @@ hmesh route --objective O [--kind K] [--difficulty D] [--harness H] [--json]
 hmesh market refresh [--source S]... [--json]
 hmesh market show [--model GLOB] [--axis reasoning|coding] [--unmatched] [--json]
 hmesh skills [--query Q]
-hmesh dispatch --harness H --objective O [--difficulty D] [--fallback H]...
+hmesh dispatch --objective O [--harness H] [--difficulty D] [--fallback H]...
 hmesh tasks [--status S]
 hmesh read <task_id> [diff|transcript|assignments] [--offset N] [--limit N]
 hmesh apply <task_id> [--strategy patch|merge|copy] [--force-copy]
@@ -312,6 +320,7 @@ hmesh init-mcp [--print] [--target PATH]
 | :--- | :--- | :--- |
 | `market.enabled` | `true` | 只读市场数据与快照缓存 |
 | `market.ttl_seconds` | `21600` | OpenRouter 与 models.dev 的缓存时长 |
+| `market.wait_seconds` | `8` | 自动刷新在派发或命令继续前的最长等待 |
 | `market.sources` | 四个来源 | 需要刷新的来源 |
 | `market.first_party_providers` | `[]`（示例配置列出十个） | 用自家 models.dev 条目定标价的厂商 |
 | `market.epoch.reasoning_benchmarks` | 六个基准 | 推理轴使用的基准 |

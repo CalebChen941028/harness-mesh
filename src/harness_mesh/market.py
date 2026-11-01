@@ -1628,6 +1628,9 @@ class MarketService:
         self._aa_day = self._day_key(self.now_fn())
         self._aa_calls = 0
         self._background_task: asyncio.Task | None = None
+        self._refresh_task: asyncio.Task | None = None
+        # A one-shot CLI refresh already spent the dispatch budget.
+        self.skip_next_dispatch_wait = False
         self._failed_sources: set[str] = set()
         self._warnings: list[str] = []
         if providers is not None:
@@ -1831,6 +1834,56 @@ class MarketService:
     def catalog(self) -> MarketCatalog:
         return self._build_catalog(warnings=None)
 
+    def needs_refresh(self) -> bool:
+        """True when a configured source has no snapshot or is past its TTL."""
+
+        if not self.config.enabled or self.offline:
+            return False
+        sources = self._sources()
+        if not sources:
+            return False
+        for source in sources:
+            snapshot = self.storage.get_market_snapshot(source)
+            if snapshot is None:
+                return True
+            age = max(0.0, self.now_fn() - snapshot["fetched_at"])
+            if age > self._ttl_for(source):
+                return True
+        return False
+
+    async def ensure_fresh(self, *, timeout: float | None = None) -> MarketRefreshResult | None:
+        """Refresh a missing or expired cache without ever blocking for long.
+
+        A timeout leaves the refresh running in the background, so the caller
+        continues with the cached catalogue or the heuristic and a later call
+        picks up the finished snapshot.  Network and parsing failures are
+        logged and never raised.
+        """
+
+        if not self.requires_network or not self.needs_refresh():
+            return None
+        wait = float(self.config.wait_seconds if timeout is None else timeout)
+        task = self._refresh_task
+        if task is None or task.done():
+            task = asyncio.create_task(self.refresh(force=False))
+            self._refresh_task = task
+
+            def _clear(finished: asyncio.Task) -> None:
+                if self._refresh_task is finished:
+                    self._refresh_task = None
+
+            task.add_done_callback(_clear)
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout=max(0.0, wait))
+        except asyncio.TimeoutError:
+            logger.warning(
+                "market refresh did not finish within %ss; using cached data", wait
+            )
+            return None
+        except Exception as exc:  # never fail a command or a dispatch
+            logger.warning("market refresh failed: %s", exc)
+            return None
+
     def _build_catalog(self, *, warnings: list[str] | None = None) -> MarketCatalog:
         warnings = list(warnings if warnings is not None else self._warnings)
         if not self.config.enabled:
@@ -1916,13 +1969,16 @@ class MarketService:
     async def stop_background_refresh(self) -> None:
         task = getattr(self, "_background_task", None)
         self._background_task = None
-        if task is None:
-            return
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
+        pending = getattr(self, "_refresh_task", None)
+        self._refresh_task = None
+        for item in (task, pending):
+            if item is None:
+                continue
+            item.cancel()
+            try:
+                await item
+            except (asyncio.CancelledError, Exception):
+                pass
 
     # -- reporting -----------------------------------------------------
     def source_status(self) -> list[dict[str, Any]]:

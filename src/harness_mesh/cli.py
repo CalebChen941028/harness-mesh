@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -20,7 +21,14 @@ from .lineage import (
     _resolved_lineage,
     _workspace_from_cwd,
 )
-from .market import EPOCH_ATTRIBUTION, filter_market_models, list_unmatched
+from .market import (
+    EPOCH_ATTRIBUTION,
+    MarketService,
+    filter_market_models,
+    is_non_model_id,
+    list_unmatched,
+    match_model,
+)
 from .models import (
     QuotaExhaustedPolicy,
     RoutingMode,
@@ -31,6 +39,7 @@ from .models import (
 )
 from .router import create_mesh_runtime
 from .security import ensure_service_workspace
+from .storage import StateStore
 
 app = typer.Typer(
     add_completion=False,
@@ -78,6 +87,23 @@ def _runtime(ctx: typer.Context):
     except RuntimeError as exc:
         typer.echo(f"Cannot start harness-mesh from this workspace: {exc}", err=True)
         raise typer.Exit(code=1) from exc
+
+
+def _ensure_market(runtime) -> None:
+    """Refresh a missing or expired market cache before a one-shot command.
+
+    The wait is bounded by ``market.wait_seconds`` (8 s by default).  A
+    timeout or a failed request leaves the previous snapshot in place and the
+    command continues; it never fails because a third-party site is down.
+    """
+
+    market = getattr(runtime.router, "market", None)
+    if market is None:
+        return
+    try:
+        asyncio.run(market.ensure_fresh())
+    except Exception:
+        pass
 
 
 def _trace_chain_option(raw: str | None) -> list[str] | None:
@@ -134,6 +160,81 @@ def _approval_summary(level: str, results) -> str:
     return (
         "The selected harnesses need no approval settings; headless runs still need manual "
         "approval for `apply_task_patch` and other write tools. Use `--approve all` to change that."
+    )
+
+
+def _market_doctor_report(config, workspace: str) -> dict[str, Any]:
+    """Read-only market health for ``hmesh doctor`` (never writes a file)."""
+
+    report: dict[str, Any] = {
+        "harness": "market",
+        "sources": [],
+        "last_refresh": None,
+        "stale": None,
+        "models": 0,
+        "matched": 0,
+        "match_rate": None,
+        "unmatched": [],
+        "note": None,
+    }
+    state_db = Path(config.state_path(workspace)) / "state.db"
+    if not state_db.exists():
+        report["note"] = "no market cache yet"
+        return report
+    try:
+        store = StateStore(state_db, read_only=True)
+    except Exception as exc:
+        report["note"] = f"cannot read the ledger: {exc}"
+        return report
+    try:
+        service = MarketService.from_config(config, store)
+        catalog = service.catalog()
+        report["sources"] = list(catalog.sources)
+        report["last_refresh"] = catalog.fetched_at
+        report["stale"] = bool(catalog.stale)
+        discovered = [
+            model
+            for model in store.list_discovered_models()
+            if not is_non_model_id(model.model_id)
+        ]
+        missing: list[str] = []
+        matched = 0
+        for model in discovered:
+            found = match_model(
+                model.model_id, catalog.models, aliases=config.market.aliases
+            )
+            if found.key:
+                matched += 1
+            else:
+                missing.append(model.model_id)
+        report["models"] = len(discovered)
+        report["matched"] = matched
+        report["match_rate"] = (
+            round(matched / len(discovered), 3) if discovered else None
+        )
+        report["unmatched"] = missing
+    finally:
+        store.close()
+    return report
+
+
+def _echo_market_doctor(report: dict[str, Any]) -> None:
+    if report.get("note"):
+        typer.echo(f"{'market':14} {'empty':10} {report['note']}")
+        return
+    sources = ", ".join(report.get("sources") or []) or "-"
+    last = report.get("last_refresh")
+    stamp = (
+        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(last)) if last else "-"
+    )
+    rate = report.get("match_rate")
+    rate_text = f"{rate:.0%}" if rate is not None else "-"
+    stale = "yes" if report.get("stale") else "no"
+    unmatched = ", ".join(report.get("unmatched") or []) or "none"
+    typer.echo(
+        f"{'market':14} {'ok':10} sources={sources} last_refresh={stamp} "
+        f"stale={stale} models={report.get('models')} "
+        f"matched={report.get('matched')} ({rate_text}) unmatched={unmatched}"
     )
 
 
@@ -251,6 +352,7 @@ def doctor(
         config_path=config_path or find_config_path(workspace),
     )
     results = installer.doctor(harness)
+    market_report = _market_doctor_report(config, workspace)
     for result in results:
         registration = installer._read_registration(result.harness)
         if registration is None:
@@ -264,7 +366,7 @@ def doctor(
             result.status = "failed"
             result.detail = f"registered workspace is invalid: {exc}"
     if json_output:
-        typer.echo(_json([result.as_dict() for result in results]))
+        typer.echo(_json([result.as_dict() for result in results] + [market_report]))
     else:
         for result in results:
             typer.echo(f"{result.harness:12} {result.status:14} {result.detail}")
@@ -281,6 +383,7 @@ def doctor(
                     f"  approvals: {approvals.get('approved')}/{approvals.get('required')} approved "
                     f"(level {approvals.get('level')}); missing: {missing}"
                 )
+        _echo_market_doctor(market_report)
     if any(result.status == "failed" for result in results):
         raise typer.Exit(code=1)
 
@@ -294,6 +397,7 @@ def status(
     """Show harness availability, authorised models and quota state."""
 
     runtime = _runtime(ctx)
+    _ensure_market(runtime)
     try:
         statuses = asyncio.run(runtime.router.list_harnesses(refresh_models=refresh))
     finally:
@@ -308,6 +412,14 @@ def status(
         typer.echo(f"{item.harness:14} {state:10} quota={item.quota_state:9} mode={item.mode}")
         typer.echo(f"  binary: {item.binary_path or '-'}  {item.version_or_detail}")
         typer.echo(f"  models: {models}")
+        for detail in item.model_details:
+            tiers = ",".join(detail.get("assigned_tiers") or []) or "-"
+            price = detail.get("blended_price")
+            typer.echo(
+                f"    {detail['model_id']}  intel={detail.get('intelligence')} "
+                f"intel_source={detail.get('intelligence_source')} "
+                f"blended={_price(price)} tiers={tiers}"
+            )
         if item.tier_models:
             typer.echo("  tiers : " + ", ".join(f"{tier}={model}" for tier, model in item.tier_models.items()))
 
@@ -322,6 +434,7 @@ def models(
     """Discover current authorised models and difficulty-tier bindings."""
 
     runtime = _runtime(ctx)
+    _ensure_market(runtime)
     try:
         payload = asyncio.run(
             runtime.router.discover_harness_models(harness=harness, force_refresh=refresh)
@@ -344,6 +457,9 @@ def models(
             authorized = "yes" if model.get("authorized") else "no"
             typer.echo(
                 f"  {model.get('model_id')}  score={model.get('capability_score')} "
+                f"intel={model.get('intelligence')} "
+                f"intel_source={model.get('intelligence_source')} "
+                f"blended={_price(model.get('blended_price'))} "
                 f"source={model.get('source')} authorized={authorized} tiers={tiers}"
             )
         tiers = item.get("tier_models") or {}
@@ -448,6 +564,10 @@ def dispatch(
     # resolves lineage from the same ledger as the MCP server instead of
     # trusting --call-depth or the (host-controlled) environment alone.
     runtime = _runtime(ctx)
+    _ensure_market(runtime)
+    if runtime.router.market is not None:
+        # The one-shot refresh above already spent the dispatch budget.
+        runtime.router.market.skip_next_dispatch_wait = True
     try:
         lineage = _resolved_lineage(runtime.router)
         inherited_depth = lineage.call_depth if lineage is not None else 0
@@ -711,6 +831,7 @@ def market_show(
             "expected one of: reasoning, coding", param_hint="--axis"
         )
     runtime = _runtime(ctx)
+    _ensure_market(runtime)
     ledger_hint: str | None = None
     catalog_empty = True
     try:
@@ -816,6 +937,7 @@ def route(
             param_hint="--difficulty",
         ) from exc
     runtime = _runtime(ctx)
+    _ensure_market(runtime)
     try:
         payload = asyncio.run(
             runtime.router.preview_routing(

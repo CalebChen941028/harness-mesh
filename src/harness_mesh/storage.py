@@ -192,10 +192,21 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
 class StateStore:
     """Thread-safe SQLite ledger used by the router, quota guardian and MCP."""
 
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, *, read_only: bool = False):
         self.path = Path(db_path).expanduser()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.read_only = read_only
         self._lock = threading.RLock()
+        if read_only:
+            # ``hmesh doctor`` inspects the ledger without creating, migrating
+            # or touching WAL files.  A missing database is simply "empty".
+            if not self.path.exists():
+                raise FileNotFoundError(self.path)
+            self._conn = sqlite3.connect(
+                f"file:{self.path}?mode=ro", uri=True, check_same_thread=False, timeout=30
+            )
+            self._conn.row_factory = sqlite3.Row
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False, timeout=30)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -235,7 +246,8 @@ class StateStore:
     def close(self) -> None:
         with self._lock:
             try:
-                self._conn.commit()
+                if not self.read_only:
+                    self._conn.commit()
             finally:
                 self._conn.close()
 

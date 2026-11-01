@@ -248,7 +248,15 @@ Epoch AI data is CC BY 4.0 and requires attribution. `hmesh market show` ends wi
 
 `hmesh market refresh` writes a snapshot to `.harness-mesh/state.db`. The default lifetime is six hours. Epoch AI and Artificial Analysis are cached for at least twelve hours; Artificial Analysis is also limited to 20 requests per process per day. A failed refresh keeps the previous snapshot and marks it stale. Cached data older than seven days still works and is flagged expired.
 
-`market.enabled: false` or `HARNESS_MESH_OFFLINE=1` stops every outbound request. Dispatch reads only the cache, so a slow or unreachable source never delays a ticket.
+`market.enabled: false` or `HARNESS_MESH_OFFLINE=1` stops every outbound request.
+
+### Hands-off refresh
+
+The cache stays current without a manual step. The MCP server refreshes in the background at start-up when a source is missing or past its TTL, then on a TTL cadence. The first dispatch that finds no market data at all waits at most `market.wait_seconds` (8 s) and then continues with the local tiers while the refresh finishes in the background. One-shot commands (`dispatch`, `route`, `status`, `models`, `market show`) run the same refresh synchronously under the same 8 s bound and fall back to the previous snapshot or the heuristic when a source is slow or down. A failed refresh only logs a warning.
+
+The controller sends an objective, nothing else. `dispatch_task` over MCP and `hmesh dispatch` default `target_harness` to `auto`, so the mesh routes across every installed harness and picks the model. The MCP `initialize` response states the same rule to every client. Passing `model` or `target_harness` explicitly keeps the previous behaviour.
+
+The market score also drives discovery: when a harness model matches the catalogue, its `capability_score`, `assigned_tiers` and tier map come from the market intelligence instead of the local heuristic. `hmesh models`, `hmesh status` and `list_harnesses` show each model's `intelligence`, `intelligence_source` and blended price, so the tier a user reads, the model dispatch picks and the route preview agree. `hmesh doctor` adds a read-only `market` row with the sources, the last successful refresh, staleness, the match rate and the unmatched models.
 
 ### Task kinds and tiers
 
@@ -314,7 +322,7 @@ hmesh route --objective O [--kind K] [--difficulty D] [--harness H] [--json]
 hmesh market refresh [--source S]... [--json]
 hmesh market show [--model GLOB] [--axis reasoning|coding] [--unmatched] [--json]
 hmesh skills [--query Q]
-hmesh dispatch --harness H --objective O [--difficulty D] [--kind K] [--routing-mode M] [--fallback H]...
+hmesh dispatch --objective O [--harness H] [--difficulty D] [--kind K] [--routing-mode M] [--fallback H]...
 hmesh tasks [--status S]
 hmesh read <task_id> [diff|transcript|assignments] [--offset N] [--limit N]
 hmesh apply <task_id> [--strategy patch|merge|copy] [--force-copy]
@@ -347,6 +355,7 @@ Key settings:
 | `difficulty_timeout_seconds` | `600/1200/1800/3600` | Per-tier assignment timeout |
 | `market.enabled` | `true` | Read-only market data and its snapshot cache |
 | `market.ttl_seconds` | `21600` | Snapshot lifetime for OpenRouter and models.dev |
+| `market.wait_seconds` | `8` | Longest automatic refresh before dispatch or a command continues |
 | `market.sources` | four sources | Providers to refresh |
 | `market.first_party_providers` | `[]` (the example config lists ten) | Vendors whose own models.dev entry sets the list price |
 | `market.epoch.reasoning_benchmarks` | six benchmarks | Benchmarks that feed the reasoning axis |

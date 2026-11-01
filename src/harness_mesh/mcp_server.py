@@ -51,6 +51,16 @@ TOOL_NAMES = [
     "update_project_context",
 ]
 
+# Sent to every client in the MCP ``initialize`` response.  Fixed text, no
+# user data and no paths: the controller never needs to name a model or a
+# harness, and the mesh owns that decision.
+MESH_INSTRUCTIONS = (
+    "Ask for an outcome. Do not pass model or target_harness: the mesh picks a "
+    "model from the task kind and price/performance. Pass task_kind when you "
+    "know it. Review changes with get_task_status and read_task_resource before "
+    "apply_task_patch."
+)
+
 _runtime: MeshRuntime | None = None
 
 
@@ -77,7 +87,7 @@ def _error_detail(exc: BaseException) -> str:
 
 
 def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
-    server = FastMCP("harness-mesh")
+    server = FastMCP("harness-mesh", instructions=MESH_INSTRUCTIONS)
     router: MeshRouter = runtime.router if isinstance(runtime, MeshRuntime) else (runtime or get_runtime().router)
 
     @server.tool()
@@ -164,7 +174,7 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
     @server.tool()
     async def dispatch_task(
         objective: str,
-        target_harness: str,
+        target_harness: str = "auto",
         difficulty: str = "auto",
         task_kind: str = "auto",
         routing_mode: str | None = None,
@@ -195,8 +205,10 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
     ) -> dict[str, Any]:
         """Dispatch a ticket.
 
-        Quota exhaustion creates a new Assignment on another harness and resumes
-        in the same worktree.
+        Only the objective is required. Leave target_harness at "auto" and model
+        unset to let the mesh choose; pass task_kind when it is known. Quota
+        exhaustion creates a new Assignment on another harness and resumes in
+        the same worktree.
         """
 
         inherited_depth, inherited_trace = _inherited_lineage(router)
@@ -251,7 +263,8 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
 
         Every task accepts the same fields as ``dispatch_task``, including
         ``task_kind``, ``routing_mode``, ``max_price_per_mtok`` and
-        ``min_intelligence``.
+        ``min_intelligence``. ``target_harness`` is optional and defaults to
+        ``auto``.
         """
 
         parent_task_id = os.environ.get("HARNESS_MESH_TASK_ID")

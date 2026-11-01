@@ -13,6 +13,7 @@ from harness_mesh.adapters.base import AdapterCall, AdapterOutcome
 from harness_mesh.config import MeshConfig, default_config
 from harness_mesh.context import ProjectContextManager
 from harness_mesh.discovery import ModelDiscoveryEngine
+from harness_mesh.market import MarketService
 from harness_mesh.models import HarnessStatus
 from harness_mesh.quota import QuotaGuardian, QuotaRecoveryMonitor
 from harness_mesh.router import MeshRouter
@@ -202,6 +203,7 @@ def make_mesh(
     probe: Any | None = None,
     config_updates: dict[str, Any] | None = None,
     http_transport: Any | None = None,
+    market_transport: Any | None = None,
     command_runner: Any | None = None,
     module_available: Any | None = None,
 ) -> MeshHarness:
@@ -243,6 +245,15 @@ def make_mesh(
         cooldown_seconds=1,
         failover_priority=config.failover_priority,
     )
+    if market_transport is None:
+        import httpx
+
+        market_transport = httpx.MockTransport(
+            lambda request: httpx.Response(503, content=b"market disabled in tests")
+        )
+    market = MarketService.from_config(
+        config, storage, env=env_map, transport=market_transport
+    )
     router = MeshRouter(
         config,
         storage,
@@ -255,6 +266,7 @@ def make_mesh(
         env=env_map,
         home_dir=home,
         probe=probe,
+        market=market,
     )
     return MeshHarness(
         config=config,

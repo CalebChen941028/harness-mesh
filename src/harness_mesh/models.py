@@ -108,6 +108,10 @@ class DiscoveredModel(_Model):
     assigned_tiers: list[str] = Field(default_factory=list)
     supports_reasoning: bool = False
     context_window: int | None = None
+    # Market scores overlaid at read time; ``None`` means the local heuristic.
+    intelligence: float | None = None
+    intelligence_source: str | None = None
+    blended_price: float | None = None
     discovered_at: float = Field(default_factory=time.time)
 
     @property
@@ -210,7 +214,8 @@ class QuotaCircuitRecord(_Model):
 
 class TaskRequest(_Model):
     task_id: str = Field(default_factory=lambda: f"task_{uuid.uuid4().hex[:12]}")
-    target_harness: str
+    # ``auto`` lets the mesh pick a runnable harness from every installed one.
+    target_harness: str = "auto"
     objective: str
     difficulty: TaskDifficulty = TaskDifficulty.AUTO
     model: str | None = None
@@ -322,6 +327,7 @@ class HarnessStatus(_Model):
     active_default_model: str | None = None
     authorized_models: list[str] = Field(default_factory=list)
     tier_models: dict[str, str] = Field(default_factory=dict)
+    model_details: list[dict[str, Any]] = Field(default_factory=list)
     quota_state: str = "closed"
     circuits: list[QuotaCircuitRecord] = Field(default_factory=list)
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ from .config import (
 )
 from .context import ProjectContextManager
 from .discovery import ModelDiscoveryEngine
-from .market import MarketService
+from .market import MarketService, blended_price, match_model
 from .models import (
     AssignmentRecord,
     ContinuationCheckpoint,
@@ -52,6 +53,8 @@ from .security import WorkspaceRootError, ensure_service_workspace, resolve_allo
 from .skills import SkillPluginManager
 from .storage import StateStore, TaskNotFoundError
 from .workspace import Changes, WorkspaceError, WorkspaceManager
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -353,6 +356,7 @@ class MeshRouter:
         except Exception:
             skills_prompt = ""
 
+        await self._ensure_market_before_dispatch()
         routing_decision = await self._route_initial(
             request, root, target, difficulty, workdir
         )
@@ -1171,7 +1175,59 @@ class MeshRouter:
         except Exception as exc:
             self._last_discovery_errors[harness] = str(exc)
             return []
+        models = self._apply_market_scores(models)
         return [model for model in models if model.authorized]
+
+    def _apply_market_scores(
+        self, models: Sequence[DiscoveredModel]
+    ) -> list[DiscoveredModel]:
+        """Overlay market intelligence, price and tiers onto discovered models.
+
+        The same overlay feeds `hmesh models`, `hmesh status`,
+        `list_harnesses`, dispatch selection and the routing preview, so the
+        tier map a user sees matches the model a ticket runs on.
+        """
+
+        output = [model.model_copy(deep=True) for model in models]
+        catalog = self.market.catalog() if self.market is not None else None
+        changed = False
+        if catalog is not None and catalog.models:
+            by_key = {model.key: model for model in catalog.models}
+            for model in output:
+                found = match_model(
+                    model.model_id,
+                    catalog.models,
+                    aliases=self.config.market.aliases,
+                )
+                market = by_key.get(found.key) if found.key else None
+                if market is None:
+                    continue
+                model.blended_price = blended_price(market)
+                if market.intelligence is not None:
+                    model.intelligence = market.intelligence
+                    model.intelligence_source = market.intelligence_source or "heuristic"
+                    model.capability_score = round(float(market.intelligence), 2)
+                    changed = True
+        if changed:
+            self.discovery.classify_and_assign_tiers(output)
+        for model in output:
+            if model.intelligence is None:
+                model.intelligence = round(float(model.capability_score), 2)
+                model.intelligence_source = "heuristic"
+        return output
+
+    def _tier_model_for(
+        self, models: Sequence[DiscoveredModel], difficulty: str
+    ) -> DiscoveredModel | None:
+        authorized = [model for model in models if model.authorized]
+        if not authorized:
+            return None
+        mapping = self.discovery.tier_models_for(authorized)
+        preferred = mapping.get(str(difficulty))
+        for model in authorized:
+            if model.model_id == preferred:
+                return model
+        return max(authorized, key=lambda item: item.capability_score)
 
     async def _gather_candidate_models(self, root: Path) -> list[DiscoveredModel]:
         candidates: list[DiscoveredModel] = []
@@ -1306,6 +1362,24 @@ class MeshRouter:
             available=self.guardian.is_available,
             preferred_effort=request.reasoning_effort,
         )
+
+    async def _ensure_market_before_dispatch(self) -> None:
+        """Wait at most ``market.wait_seconds`` for the first market snapshot."""
+
+        market = self.market
+        if market is None:
+            return
+        if market.skip_next_dispatch_wait:
+            market.skip_next_dispatch_wait = False
+            return
+        if not market.requires_network:
+            return
+        if market.catalog().models:
+            return
+        try:
+            await market.ensure_fresh(timeout=float(self.config.market.wait_seconds))
+        except Exception as exc:  # a cold source never fails a ticket
+            logger.warning("market warm-up failed: %s", exc)
 
     async def _route_initial(
         self,
@@ -1479,7 +1553,10 @@ class MeshRouter:
             for harness in ordered_targets:
                 if harness in request.trace_chain:
                     continue
-                candidate = self.discovery.resolve_model(harness, difficulty.value)
+                candidate = self._tier_model_for(
+                    [item for item in all_candidates if item.harness == harness],
+                    difficulty.value,
+                )
                 if candidate is not None and candidate.authorized:
                     preferred = candidate
                     break
@@ -2275,10 +2352,24 @@ class MeshRouter:
                 )
             except Exception:
                 models = self.storage.list_discovered_models(harness)
+            models = self._apply_market_scores(models)
             authorized = [model.model_id for model in models if model.authorized]
             tier_models = self._tier_models_from_models(models)
             status.authorized_models = authorized
             status.tier_models = tier_models
+            status.model_details = [
+                {
+                    "model_id": model.model_id,
+                    "authorized": model.authorized,
+                    "capability_score": model.capability_score,
+                    "intelligence": model.intelligence,
+                    "intelligence_source": model.intelligence_source,
+                    "blended_price": model.blended_price,
+                    "assigned_tiers": list(model.assigned_tiers),
+                    "source": model.source,
+                }
+                for model in models
+            ]
             if not status.active_default_model:
                 for model in models:
                     if model.authorized and model.is_active_default:
@@ -2333,13 +2424,16 @@ class MeshRouter:
                 harness, workspace_root=self.workspace_root, force_refresh=force_refresh
             )
         except Exception as exc:
-            models = self.storage.list_discovered_models(harness)
+            models = self._apply_market_scores(
+                self.storage.list_discovered_models(harness)
+            )
             return {
                 "harness": harness,
                 "error": str(exc),
                 "models": [model.model_dump(mode="json") for model in models],
                 "tier_models": self._tier_models_from_models(models),
             }
+        models = self._apply_market_scores(models)
         return {
             "harness": harness,
             "models": [model.model_dump(mode="json") for model in models],

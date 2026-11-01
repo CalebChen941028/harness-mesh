@@ -1167,7 +1167,10 @@ async def test_mcp_server_registers_fifteen_tools(tmp_path):
 
         by_name = {tool.name: tool for tool in tools}
         dispatch_schema = by_name["dispatch_task"].inputSchema
-        assert {"objective", "target_harness"} <= set(dispatch_schema["required"])
+        # The controller only has to name an outcome; the mesh picks the rest.
+        assert "objective" in dispatch_schema["required"]
+        assert "target_harness" not in dispatch_schema["required"]
+        assert "target_harness" in dispatch_schema["properties"]
         assert {
             "difficulty",
             "on_quota_exhausted",

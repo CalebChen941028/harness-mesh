@@ -226,6 +226,9 @@ class MarketConfig(BaseModel):
 
     enabled: bool = True
     ttl_seconds: int = 21_600
+    # Upper bound for an automatic refresh before dispatch or a CLI command
+    # continues with the cached (or heuristic) data.
+    wait_seconds: float = 8.0
     sources: list[str] = Field(
         default_factory=lambda: ["openrouter", "models_dev", "epoch", "artificial_analysis"]
     )
