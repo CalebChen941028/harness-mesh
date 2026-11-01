@@ -16,6 +16,12 @@ class ZCodeAdapter(BaseHarnessAdapter):
             return True
         return bool(self.harness_config.extra.get("supports_mcp_flag"))
 
+    _RESTRICTED_MODES = ("build", "edit", "plan")
+
+    def _restricted_mode(self) -> str:
+        configured = str(self.harness_config.extra.get("restricted_mode") or "build")
+        return configured if configured in self._RESTRICTED_MODES else "build"
+
     def _augment_command(self, args: list[str], call: AdapterCall) -> list[str]:
         extra: list[str] = []
         if "--mode" not in args:
@@ -23,6 +29,12 @@ class ZCodeAdapter(BaseHarnessAdapter):
                 extra.extend(["--mode", "plan"])
             elif self._auto_approval_allowed(call):
                 extra.extend(self._auto_approve_args(["--mode", "yolo"]))
+            else:
+                # ``zcode -p`` defaults to yolo, so leaving the flag off would not
+                # withhold approval.  Measured headless on ZCode 0.17.0: ``build``
+                # denies file writes and shell, ``edit`` allows writes but denies
+                # shell, ``guarded`` still allows both.
+                extra.extend(["--mode", self._restricted_mode()])
         if call.session_id and "--resume" not in args:
             extra.extend(["--resume", call.session_id])
         if extra:
