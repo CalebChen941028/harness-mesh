@@ -90,6 +90,8 @@ hmesh install --uninstall               # remove integrations
 
 Without `--dry-run`, `hmesh install` prints the planned files and commands and asks for confirmation. A non-interactive shell must pass `--yes`.
 
+Headless runs cannot answer approval prompts. Verified on the real harnesses (2026-11-01): `codex exec` denies the MCP call with "approval policy is never" unless the server is approved with `-c 'mcp_servers.harness-mesh.default_tools_approval_mode="approve"'`; `agy -p` auto-denies it unless `permissions.allow` holds a matching rule such as `mcp(harness-mesh/list_harnesses)`. ZCode and DeepSeek Harness workers call the tools without extra configuration, and Claude Code shows the server as connected. Interactive sessions prompt as usual.
+
 ZCode's `--scope project` still records the marketplace and plugin in the global state files `~/.zcode/cli/plugins/known_marketplaces.json` and `installed_plugins.json`, even though the plugin and its cache are project-scoped. `hmesh install --uninstall` removes both entries; the matching `zcode plugins uninstall` and `zcode plugins marketplace remove` commands do the same by hand.
 
 Restart the desktop application after installation and start a new chat/task. Existing chats may keep a cached tool list. The installer is idempotent; editing an existing DSH entry or re-adding an MCP server replaces the previous registration rather than duplicating it.

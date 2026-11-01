@@ -19,6 +19,10 @@ Security hardening release addressing two independent audits.
 - `max_active_assignments` is counted from running rows with live pids in the shared `state.db`; rows left behind by a dead process are closed as `ended_error` with `error_reason=stale`.
 - `tests/test_real_machine_mcp_env.py` and a reusable `tests/fixtures/mcp_probe_server.py` verify environment propagation and worktree cwd for the real harness CLIs. Real-machine suites now require `HARNESS_MESH_REAL_MACHINE=1`; global-configuration tests (ZCode plugin marketplace, Antigravity MCP registration) also require `HARNESS_MESH_REAL_MACHINE_GLOBAL=1` and restore the previous state.
 
+### Documented
+
+- Headless approval behaviour measured on the real harnesses: Codex and Antigravity deny MCP calls without an approval setting. `hmesh install` now prints the two settings after a successful install.
+
 ### Changed
 
 - Sensitive filtering uses narrowed filename rules plus Git pathspec excludes; `.env.example`/`.env.sample`/`.env.template`/`.env.dist` and ordinary `credentials*.py` source files remain visible. `.ssh`, `.aws`, `.gnupg`, and `.git` path segments are always treated as sensitive. Mesh no longer writes sensitive patterns into the user's `.git/info/exclude`.

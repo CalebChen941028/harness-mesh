@@ -87,6 +87,8 @@ hmesh install --uninstall               # 卸载集成
 
 ZCode 的 `--scope project` 仍会写入全局状态文件 `~/.zcode/cli/plugins/known_marketplaces.json` 与 `installed_plugins.json`，插件本身和缓存则按项目隔离。`hmesh install --uninstall` 会清除这两处记录；手工清理时对应命令为 `zcode plugins uninstall` 与 `zcode plugins marketplace remove`。
 
+无界面运行无法回答审批提示。真机实测（2026-11-01）：`codex exec` 以"approval policy is never"拒绝 MCP 调用，需要用 `-c 'mcp_servers.harness-mesh.default_tools_approval_mode="approve"'` 放行该服务；`agy -p` 自动拒绝，需要在 `permissions.allow` 里加入匹配规则，例如 `mcp(harness-mesh/list_harnesses)`。ZCode 与 DeepSeek Harness 作为 Worker 无需额外配置即可调用，Claude Code 显示该服务已连接。交互式会话照常弹出审批。
+
 安装后重启对应桌面应用，并新建会话/任务；旧会话可能缓存旧工具列表。安装器是幂等的：重复执行会替换已有注册，不会产生重复 DSH 条目。
 
 ## 快速开始
