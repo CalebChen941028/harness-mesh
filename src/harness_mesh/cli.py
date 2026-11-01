@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 import typer
 
+from .approvals import APPROVAL_LEVELS, DEFAULT_APPROVAL_LEVEL
 from .config import find_config_path, load_config
 from .installer import HarnessInstaller
 from .lineage import (
@@ -88,16 +89,42 @@ def _trace_chain_option(raw: str | None) -> list[str] | None:
     return None
 
 
-_APPROVAL_HINT = (
-    "Note: headless runs (codex exec, agy -p) cannot prompt for MCP approval and deny the call. "
-    "Codex: -c 'mcp_servers.harness-mesh.default_tools_approval_mode=\"approve\"'. "
-    "Antigravity: add an allow rule such as mcp(harness-mesh/list_harnesses) under permissions.allow."
-)
+def _approval_summary(level: str, results) -> str:
+    approved: set[str] = set()
+    for result in results:
+        if result.installed:
+            approved.update(result.approvals.get("tools") or [])
+    if level == "none":
+        return (
+            "未预先批准任何 MCP 工具；无界面运行会被拒绝，"
+            "可用 `--approve read` 或 `--approve dispatch` 预先批准。"
+        )
+    if level == "all" and approved:
+        return f"已批准 {len(approved)} 个工具（全部）；无界面运行不再需要逐次批准。"
+    if approved:
+        return (
+            f"已批准 {len(approved)} 个工具；无界面运行 `apply_task_patch` 等仍需手动批准，"
+            "可用 `--approve all`"
+        )
+    return (
+        "所选 Harness 无需批准设置；无界面运行 `apply_task_patch` 等仍需手动批准，"
+        "可用 `--approve all`"
+    )
 
 
 def _echo_install_results(results) -> None:
     for result in results:
         typer.echo(f"{result.harness:12} {result.action:12} {result.detail}")
+        approvals = result.approvals or {}
+        if approvals:
+            tools = approvals.get("tools") or []
+            typer.echo(
+                f"  approvals: level={approvals.get('level')} tools={len(tools)} "
+                f"status={approvals.get('status')}"
+            )
+            if approvals.get("status") == "planned":
+                for entry in approvals.get("entries") or []:
+                    typer.echo(f"    {entry}")
         for path in result.files:
             typer.echo(f"  file: {path}")
         for command in result.commands:
@@ -114,9 +141,20 @@ def install(
     dry_run: bool = typer.Option(False, "--dry-run", help="Show planned commands/files without changing anything."),
     yes: bool = typer.Option(False, "--yes", help="Skip the interactive confirmation."),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+    approve: str = typer.Option(
+        DEFAULT_APPROVAL_LEVEL,
+        "--approve",
+        help="Pre-approve MCP tools: read, dispatch (default), all, or none.",
+    ),
 ) -> None:
     """One-command installation of Harness-Mesh into every detected harness UI."""
 
+    level = approve.lower()
+    if level not in APPROVAL_LEVELS:
+        raise typer.BadParameter(
+            "expected one of: " + ", ".join(APPROVAL_LEVELS),
+            param_hint="--approve",
+        )
     options = ctx.obj or {}
     workspace = options.get("workspace") or _workspace_from_cwd()
     config_path = options.get("config")
@@ -133,6 +171,7 @@ def install(
             workspace,
             config_path=config_path or find_config_path(workspace),
             dry_run=dry,
+            approval_level=level,
         )
 
     planned = build(True).install(harness, uninstall=uninstall)
@@ -162,7 +201,7 @@ def install(
         typer.echo("Result:")
         _echo_install_results(results)
         if not uninstall and any(result.installed for result in results):
-            typer.echo(_APPROVAL_HINT)
+            typer.echo(_approval_summary(level, results))
     if any(result.action == "failed" for result in results):
         raise typer.Exit(code=1)
 
@@ -204,6 +243,19 @@ def doctor(
     else:
         for result in results:
             typer.echo(f"{result.harness:12} {result.status:14} {result.detail}")
+            approvals = result.approvals or {}
+            if not approvals:
+                continue
+            if approvals.get("status") == "not_required":
+                typer.echo("  approvals: 无需批准设置")
+            elif approvals.get("status") == "failed":
+                typer.echo(f"  approvals: {approvals.get('detail')}")
+            else:
+                missing = ", ".join(approvals.get("missing") or []) or "none"
+                typer.echo(
+                    f"  approvals: {approvals.get('approved')}/{approvals.get('required')} approved "
+                    f"(level {approvals.get('level')}); missing: {missing}"
+                )
     if any(result.status == "failed" for result in results):
         raise typer.Exit(code=1)
 

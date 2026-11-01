@@ -507,3 +507,33 @@ def test_claude_malformed_settings_returns_failed_without_touching_file(tmp_path
     assert result.action == "failed"
     assert "permissions must be an object" in result.detail
     assert _claude_path(home).read_text(encoding="utf-8") == original
+
+
+def test_claude_unreadable_settings_returns_failed_without_touching_file(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    _claude_path(home).parent.mkdir(parents=True)
+    original = b"\xff\xfe\x00broken"
+    _claude_path(home).write_bytes(original)
+    installer, home, _ = _installer(tmp_path, home=home)
+
+    result = installer.install(["claude_code"])[0]
+    assert result.action == "failed"
+    assert "cannot read" in result.detail
+    assert _claude_path(home).read_bytes() == original
+
+
+def test_codex_service_wide_approval_counts_as_full_coverage(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    _codex_path(home).parent.mkdir(parents=True)
+    _codex_path(home).write_text(
+        '[mcp_servers.harness-mesh]\ncommand = "/old/python"\ndefault_tools_approval_mode = "approve"\n',
+        encoding="utf-8",
+    )
+    installer, home, _ = _installer(tmp_path, home=home)
+
+    report = installer.approval_report("codex")
+    assert report["approved"] == 10
+    assert report["missing"] == []
+    assert len(report["tools"]) == 13

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `hmesh install --approve {read,dispatch,all,none}` (default `dispatch`) writes per-tool MCP pre-approvals for Claude Code (`~/.claude/settings.json`), Codex (`~/.codex/config.toml`) and Antigravity (`~/.gemini/config/config.json`). `read` covers the seven read tools, `dispatch` adds the three dispatch tools, `all` covers all thirteen, and `none` writes nothing while removing rules written by this tool. ZCode and DeepSeek Harness need no approval settings.
+- `hmesh doctor` reports approved and missing tools against the default `dispatch` level without changing files.
+
+### Changed
+
+- The install epilogue states the level and number of pre-approved tools instead of printing the old service-wide Codex and Antigravity hint.
+
 ## 0.3.1 — 2026-11-01
 
 Security hardening release addressing two independent audits.

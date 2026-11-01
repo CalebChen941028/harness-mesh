@@ -1,7 +1,8 @@
-"""``hmesh install`` tells headless users how to approve the MCP server."""
+"""``hmesh install`` explains the approval level that was actually applied."""
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -19,24 +20,55 @@ def _invoke(tmp_path, *args):
     workspace = tmp_path / "workspace"
     if not workspace.exists():
         init_git_repo(workspace, {"README.md": "install hint\n"})
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("claude", "codex", "agy"):
+        path = bin_dir / name
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
     config = Path(__file__).resolve().parents[1] / "config" / "harnesses.example.yaml"
     return CliRunner().invoke(
         cli_app,
-        ["--workspace", str(workspace), "--config", str(config), "install", "--harness", "zcode", *args],
-        env={"HOME": str(tmp_path / "home"), "HARNESS_MESH_DISABLE_SYSTEM_BINARIES": "1"},
+        [
+            "--workspace",
+            str(workspace),
+            "--config",
+            str(config),
+            "install",
+            "--harness",
+            "claude_code",
+            *args,
+        ],
+        env={
+            "HOME": str(tmp_path / "home"),
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}",
+            "HARNESS_MESH_DISABLE_SYSTEM_BINARIES": "1",
+        },
     )
 
 
-def test_install_prints_the_headless_approval_hint(tmp_path):
+def test_install_prints_the_approval_summary(tmp_path):
     result = _invoke(tmp_path, "--yes")
     assert result.exit_code == 0, result.output
     output = _plain(result.output)
-    assert "default_tools_approval_mode" in output
-    assert "mcp(harness-mesh/list_harnesses)" in output
+    assert "已批准 10 个工具" in output
+    assert "apply_task_patch" in output
+    assert "--approve all" in output
+    assert "default_tools_approval_mode" not in output
+    assert "mcp(harness-mesh/list_harnesses)" not in output
 
 
-def test_uninstall_and_dry_run_do_not_print_the_hint(tmp_path):
+def test_install_none_reports_that_nothing_was_approved(tmp_path):
+    result = _invoke(tmp_path, "--yes", "--approve", "none")
+    assert result.exit_code == 0, result.output
+    output = _plain(result.output)
+    assert "未预先批准任何 MCP 工具" in output
+    assert "已批准 10 个工具" not in output
+
+
+def test_uninstall_and_dry_run_do_not_print_the_final_summary(tmp_path):
     dry = _plain(_invoke(tmp_path, "--dry-run").output)
-    assert "default_tools_approval_mode" not in dry
+    assert "已批准 10 个工具" not in dry
+    assert "approvals: level=dispatch tools=10 status=planned" in dry
     removed = _plain(_invoke(tmp_path, "--yes", "--uninstall").output)
-    assert "default_tools_approval_mode" not in removed
+    assert "已批准 10 个工具" not in removed

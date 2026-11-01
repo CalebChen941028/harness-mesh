@@ -396,16 +396,17 @@ class HarnessInstaller:
             )
             return base
         approved_set = set(approved)
+        covered = [tool for tool in required if tool in approved_set]
         missing = [tool for tool in required if tool not in approved_set]
         base.update(
             status="ok" if not missing else "missing",
-            approved=len(approved),
+            approved=len(covered),
             tools=approved,
             missing=missing,
             detail=(
-                f"{len(approved)} approved, no required tool missing"
+                f"{len(covered)}/{len(required)} required tools approved"
                 if not missing
-                else f"{len(approved)} approved, missing: {', '.join(missing)}"
+                else f"{len(covered)}/{len(required)} required tools approved, missing: {', '.join(missing)}"
             ),
         )
         return base
@@ -440,18 +441,20 @@ class HarnessInstaller:
             ]
         else:
             parsed = tomllib.loads(text)
-            table = (
-                parsed.get("mcp_servers", {})
-                .get(MCP_SERVER_NAME, {})
-                .get("tools", {})
-            )
-            if not isinstance(table, dict):
-                raise ValueError("mcp_servers.harness-mesh.tools must be a table")
-            names = [
-                str(name)
-                for name, row in table.items()
-                if isinstance(row, dict) and row.get("approval_mode") == "approve"
-            ]
+            server = parsed.get("mcp_servers", {}).get(MCP_SERVER_NAME, {})
+            if not isinstance(server, dict):
+                raise ValueError(f"mcp_servers.{MCP_SERVER_NAME} must be a table")
+            if server.get("default_tools_approval_mode") == "approve":
+                names = list(TOOL_APPROVAL_CLASSES)
+            else:
+                table = server.get("tools", {})
+                if not isinstance(table, dict):
+                    raise ValueError("mcp_servers.harness-mesh.tools must be a table")
+                names = [
+                    str(name)
+                    for name, row in table.items()
+                    if isinstance(row, dict) and row.get("approval_mode") == "approve"
+                ]
         return [name for name in names if name in TOOL_APPROVAL_CLASSES]
 
     def _apply_approvals(self, harness: str, tools: list[str] | None = None) -> dict[str, Any]:
@@ -464,7 +467,16 @@ class HarnessInstaller:
             )
         selected = self._approvals_for_level() if tools is None else list(tools)
         path = self._approval_path(harness)
-        original = path.read_text(encoding="utf-8") if path.exists() else None
+        try:
+            original = path.read_text(encoding="utf-8") if path.exists() else None
+        except (OSError, ValueError) as exc:
+            return self._approval_payload(
+                harness,
+                "failed",
+                selected,
+                files=[path],
+                detail=f"cannot read {path}: {exc}",
+            )
         if original is None and not selected:
             return self._approval_payload(harness, "cleared", [])
         if harness == "codex":
@@ -722,7 +734,7 @@ class HarnessInstaller:
         if harness == "codex":
             try:
                 prep = self._prepare_codex_approvals()
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 return InstallResult(
                     harness,
                     "failed",
@@ -812,7 +824,7 @@ class HarnessInstaller:
         if harness == "codex":
             try:
                 prep = self._prepare_codex_approvals()
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 return InstallResult(
                     harness,
                     "failed",

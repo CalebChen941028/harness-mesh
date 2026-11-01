@@ -78,6 +78,7 @@ hmesh install
 ```bash
 hmesh install --dry-run                 # 只显示计划执行的命令/文件，不修改任何配置
 hmesh install --yes                     # 非交互确认后安装
+hmesh install --approve read            # 预先批准 7 个只读 MCP 工具
 hmesh install --harness zcode           # 只安装一个 Harness（可重复）
 hmesh install --workspace /path/project # 显式绑定 MCP 工作区
 hmesh install --uninstall               # 卸载集成
@@ -85,9 +86,31 @@ hmesh install --uninstall               # 卸载集成
 
 非 `--dry-run` 时会先打印计划修改的文件和命令并请求确认；非交互环境必须显式传 `--yes`。
 
-ZCode 的 `--scope project` 仍会写入全局状态文件 `~/.zcode/cli/plugins/known_marketplaces.json` 与 `installed_plugins.json`，插件本身和缓存则按项目隔离。`hmesh install --uninstall` 会清除这两处记录；手工清理时对应命令为 `zcode plugins uninstall` 与 `zcode plugins marketplace remove`。
+### MCP 工具预先批准
 
-无界面运行无法回答审批提示。真机实测（2026-11-01）：`codex exec` 以"approval policy is never"拒绝 MCP 调用，需要用 `-c 'mcp_servers.harness-mesh.default_tools_approval_mode="approve"'` 放行该服务；`agy -p` 自动拒绝，需要在 `permissions.allow` 里加入匹配规则，例如 `mcp(harness-mesh/list_harnesses)`。ZCode 与 DeepSeek Harness 作为 Worker 无需额外配置即可调用，Claude Code 显示该服务已连接。交互式会话照常弹出审批。
+交互式会话在调用 MCP 工具前会询问。`codex exec`、`agy -p` 这类无界面命令无法回答，`hmesh install` 因此按工具写入放行规则：
+
+```bash
+hmesh install --approve dispatch   # 默认：10 个只读与调度工具
+hmesh install --approve read       # 7 个只读工具
+hmesh install --approve all        # 全部 13 个
+hmesh install --approve none       # 不写入，并清掉本工具写过的规则
+```
+
+默认级别 `dispatch` 批准 7 个只读工具，以及 `dispatch_task`、`parallel_dispatch`、`cancel_task`。派发任务在隔离 Worktree 内运行，改动要经过 `apply_task_patch` 才进入主工作区。三个写入工具仍默认人工批准：`apply_task_patch`、`report_quota_status`、`update_project_context` 会改动主工作区或共享状态。确实需要时用 `--approve all` 一并放行。
+
+| Harness | 文件 | 规则 |
+| :--- | :--- | :--- |
+| Claude Code | `~/.claude/settings.json` | `permissions.allow` 加入 `mcp__harness-mesh__<工具>` |
+| Codex | `~/.codex/config.toml` | 托管块内写入 `[mcp_servers.harness-mesh.tools.<工具>]`，值为 `approval_mode = "approve"` |
+| Antigravity | `~/.gemini/config/config.json` | `userSettings.globalPermissionGrants.allow` 加入 `mcp(harness-mesh/<工具>)` |
+| ZCode、DeepSeek Harness | 无 | Worker 调用 MCP 工具无需批准设置 |
+
+安装器是幂等的。首次改动前写 `<文件>.harness-mesh.bak` 备份，改动经临时文件替换，写后重新解析；校验失败时还原改动前的内容。降低级别或卸载时，只移除 `mcp__harness-mesh__` 或 `mcp(harness-mesh/` 开头的条目，以及 Codex 托管块，其他规则保持原样。`--dry-run` 打印批准数量与每条规则，不落盘。`hmesh doctor` 按默认级别 `dispatch` 报告已批准和缺失的工具，不改任何文件；在 Codex 上，服务级 `default_tools_approval_mode = "approve"` 也算覆盖全部工具。
+
+无界面运行无法回答审批提示。真机实测（2026-11-01）：`codex exec` 以"approval policy is never"拒绝 MCP 调用，服务未获批准时无法执行；`agy -p` 在 `permissions.allow` 没有匹配规则时自动拒绝，例如缺少 `mcp(harness-mesh/list_harnesses)`。上面的按工具规则覆盖所选级别；Codex 的服务级参数 `-c 'mcp_servers.harness-mesh.default_tools_approval_mode="approve"'` 仍可手工使用，它一次批准该服务的全部工具。ZCode 与 DeepSeek Harness 作为 Worker 无需额外配置即可调用，Claude Code 显示该服务已连接。交互式会话照常弹出审批。
+
+ZCode 的 `--scope project` 仍会写入全局状态文件 `~/.zcode/cli/plugins/known_marketplaces.json` 与 `installed_plugins.json`，插件本身和缓存则按项目隔离。`hmesh install --uninstall` 会清除这两处记录；手工清理时对应命令为 `zcode plugins uninstall` 与 `zcode plugins marketplace remove`。
 
 安装后重启对应桌面应用，并新建会话/任务；旧会话可能缓存旧工具列表。安装器是幂等的：重复执行会替换已有注册，不会产生重复 DSH 条目。
 
@@ -197,7 +220,7 @@ Ticket task_x（一份 Git Worktree）
 ## CLI
 
 ```text
-hmesh install [--dry-run] [--yes] [--harness H]... [--uninstall]
+hmesh install [--dry-run] [--yes] [--approve LEVEL] [--harness H]... [--uninstall]
 hmesh doctor [--harness H] [--json]
 hmesh status [--refresh] [--json]
 hmesh models [--refresh] [--harness H]
