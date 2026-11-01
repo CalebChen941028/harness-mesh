@@ -44,7 +44,7 @@ CODEX_APPROVAL_BLOCK_END = "# <<< harness-mesh approvals"
 CLAUDE_APPROVAL_PREFIX = f"mcp__{MCP_SERVER_NAME}__"
 ANTIGRAVITY_APPROVAL_PREFIX = f"mcp({MCP_SERVER_NAME}/"
 APPROVAL_BACKUP_SUFFIX = ".harness-mesh.bak"
-NO_APPROVAL_DETAIL = "无需批准设置"
+NO_APPROVAL_DETAIL = "no approval settings needed"
 
 
 @dataclass

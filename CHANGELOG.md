@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- ZCode no longer falls back to its yolo default when approval is withheld (`shared_write` without `auto_approve_shared_write`, or `auto_approve: false`): the adapter passes `--mode build`, configurable to `edit` or `plan` through `restricted_mode`. Measured headless on ZCode 0.17.0: `build` denies writes and shell, `edit` allows writes only, `guarded` allows both.
+- Install output and `hmesh doctor` approval lines are in English, matching the rest of the CLI.
+
 ### Added
 
 - `hmesh install --approve {read,dispatch,all,none}` (default `dispatch`) writes per-tool MCP pre-approvals for Claude Code (`~/.claude/settings.json`), Codex (`~/.codex/config.toml`) and Antigravity (`~/.gemini/config/config.json`). `read` covers the seven read tools, `dispatch` adds the three dispatch tools, `all` covers all thirteen, and `none` writes nothing while removing rules written by this tool. ZCode and DeepSeek Harness need no approval settings.
