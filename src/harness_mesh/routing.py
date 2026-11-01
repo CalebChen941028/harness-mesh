@@ -14,7 +14,14 @@ from typing import Any, Callable, Mapping, Sequence
 from pydantic import BaseModel, ConfigDict, Field
 
 from .config import RoutingConfig
-from .market import MarketCatalog, MarketModel, blended_price, match_model, normalize_model_identity
+from .market import (
+    EPOCH_ATTRIBUTION,
+    MarketCatalog,
+    MarketModel,
+    blended_price,
+    match_model,
+    normalize_model_identity,
+)
 from .models import (
     DiscoveredModel,
     RoutingMode,
@@ -205,6 +212,7 @@ class RoutingDecision(BaseModel):
     reasons: list[str] = Field(default_factory=list)
     axis_scores: dict[str, dict[str, Any]] = Field(default_factory=dict)
     benchmarks_used: list[str] = Field(default_factory=list)
+    attribution: str = EPOCH_ATTRIBUTION
     data: RoutingData = Field(default_factory=RoutingData)
 
 

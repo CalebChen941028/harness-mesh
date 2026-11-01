@@ -2,8 +2,16 @@
 
 ## 0.4.0 — 2026-11-01
 
+### Added
+
+- Epoch AI "Capabilities & benchmarking" as a fourth, keyless market source (`epoch.ai/data/benchmark_data.zip`, CC BY 4.0). The archive is read with `zipfile`, only for the configured benchmark CSVs, with a 25 MB response cap, an 80 MB expanded cap, `..`/absolute-path rejection and same-host redirects. Each benchmark yields a percentile inside a 540-day reference window; the reasoning and coding axes are averaged, an axis with fewer than three scored benchmarks stays empty, and `intelligence_source` gains `epoch_ai`. The default cache lifetime is twelve hours. `hmesh market show` prints the required attribution and every routing decision carries it in `attribution`.
+- `routing.axis_weights`: `plan`/`audit`/`review` score reasoning 0.7 / coding 0.3, `implement`/`refactor`/`debug`/`test` score coding 0.7 / reasoning 0.3, `docs` scores reasoning 1.0. A model with one axis uses that axis at full weight. Routing decisions now record `axis_scores` and `benchmarks_used`.
+- `hmesh market show --axis reasoning|coding` sorts by and displays one axis, plus the benchmark count, benchmark data date and `intelligence_source`.
+
 ### Fixed
 
+- models.dev reseller rows no longer become separate models. Entries fold onto one canonical model per name and the list price comes from the vendor's own entry, then OpenRouter, then the median of the priced offers. A row that prices input and output at zero is unknown, not free. The catalogue drops from thousands of rows to hundreds of models.
+- `hmesh market show --model` applies the same normalisation as the catalogue (dots and hyphens are equivalent, case-insensitive, globs supported) and reports `no model matches GLOB` instead of claiming the cache is empty. `--unmatched` now reads the discovery ledger and lists harness models with no market match, with `confidence: none` and a `market.aliases` hint; an empty ledger asks for `hmesh models --refresh`.
 - ZCode no longer falls back to its yolo default when approval is withheld (`shared_write` without `auto_approve_shared_write`, or `auto_approve: false`): the adapter passes `--mode build`, configurable to `edit` or `plan` through `restricted_mode`. Measured headless on ZCode 0.17.0: `build` denies writes and shell, `edit` allows writes only, `guarded` allows both.
 - Install output and `hmesh doctor` approval lines are in English, matching the rest of the CLI.
 

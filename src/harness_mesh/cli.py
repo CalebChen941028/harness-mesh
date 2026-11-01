@@ -20,7 +20,7 @@ from .lineage import (
     _resolved_lineage,
     _workspace_from_cwd,
 )
-from .market import filter_market_models, list_unmatched
+from .market import EPOCH_ATTRIBUTION, filter_market_models, list_unmatched
 from .models import (
     QuotaExhaustedPolicy,
     RoutingMode,
@@ -695,6 +695,9 @@ def market_show(
     model: Optional[str] = typer.Option(
         None, "--model", "-m", help="Filter by a model glob (matched against key and name)."
     ),
+    axis: Optional[str] = typer.Option(
+        None, "--axis", help="reasoning|coding: show that axis and sort by it."
+    ),
     unmatched: bool = typer.Option(
         False, "--unmatched", help="List harness models that have no market match."
     ),
@@ -702,6 +705,11 @@ def market_show(
 ) -> None:
     """Show the cached market catalogue and optional unmatched harness models."""
 
+    axis_name = (axis or "").strip().lower() or None
+    if axis_name is not None and axis_name not in {"reasoning", "coding"}:
+        raise typer.BadParameter(
+            "expected one of: reasoning, coding", param_hint="--axis"
+        )
     runtime = _runtime(ctx)
     ledger_hint: str | None = None
     catalog_empty = True
@@ -709,14 +717,26 @@ def market_show(
         catalog = runtime.router.market.catalog()
         catalog_empty = not catalog.models
         rows = filter_market_models(catalog.models, model)
+        if axis_name is not None:
+            field = f"intelligence_{axis_name}"
+            rows = sorted(
+                rows,
+                key=lambda item: (
+                    getattr(item, field) is None,
+                    -(getattr(item, field) or 0.0),
+                    item.key,
+                ),
+            )
         payload: dict[str, Any] = {
             "models": [item.model_dump(mode="json") for item in rows],
             "matched": len(rows),
+            "axis": axis_name,
             "sources": list(catalog.sources),
             "fetched_at": catalog.fetched_at,
             "stale": catalog.stale,
             "expired": catalog.expired,
             "warnings": list(catalog.warnings),
+            "attribution": EPOCH_ATTRIBUTION,
         }
         if unmatched:
             ledger = runtime.storage.list_discovered_models()
@@ -746,12 +766,20 @@ def market_show(
     elif model and not rows:
         typer.echo(f"no model matches {model}")
     for item in rows:
+        axis_column = ""
+        if axis_name is not None:
+            value = getattr(item, f"intelligence_{axis_name}")
+            axis_column = f" {axis_name}={value if value is not None else '-':>5}"
         typer.echo(
             f"{item.key:48} in={_price(item.input_per_mtok):>8} "
             f"out={_price(item.output_per_mtok):>8} "
             f"intel={item.intelligence if item.intelligence is not None else '-':>5} "
-            f"source={item.intelligence_source or '-'} ctx={item.context_window or '-'}"
+            f"source={item.intelligence_source or '-'} "
+            f"bench={len(item.benchmarks_used)} "
+            f"data={item.benchmark_data_date or '-'} "
+            f"ctx={item.context_window or '-'}{axis_column}"
         )
+    typer.echo(EPOCH_ATTRIBUTION)
     if payload["stale"]:
         typer.echo("cache is stale; refresh it when the network is available")
     if unmatched:
@@ -829,6 +857,7 @@ def route(
         )
     for reason in routing.get("reasons") or []:
         typer.echo(f"  - {reason}")
+    typer.echo(routing.get("attribution") or EPOCH_ATTRIBUTION)
 
 
 @app.command()

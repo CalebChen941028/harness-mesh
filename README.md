@@ -235,13 +235,18 @@ The mesh can rank models by published price and evaluation score instead of rely
 | :--- | :--- | :--- |
 | OpenRouter `/api/v1/models` | none | list price per token, context window, reasoning and tool flags |
 | models.dev `/api.json` | none | list price per million tokens, context window, release date |
+| Epoch AI `benchmark_data.zip` | none | reasoning and coding benchmark percentiles, benchmark dates |
 | Artificial Analysis `/api/v2/language/models/free` | `ARTIFICIAL_ANALYSIS_API_KEY` | intelligence index, list price, output speed |
 
-OpenRouter prices win over models.dev when both know a model. Evaluation scores come from Artificial Analysis or a user override. Without a key, the mesh computes a labelled heuristic from the existing discovery score, the price percentile, the reasoning flag and the release date.
+models.dev lists the same model once per provider, including hundreds of resale gateways. Those rows fold onto one canonical model per name. The price comes from the model vendor's own entry (listed in `market.first_party_providers`), then from OpenRouter, then from the median of every priced offer. An entry that prices input and output at zero counts as unknown, not free.
 
-The heuristic is not an evaluation. Every score carries `intelligence_source`: `artificial_analysis`, `override` or `heuristic`. `hmesh market show` and the `get_model_market` MCP tool print that field.
+Epoch AI publishes the CC BY 4.0 ["Capabilities & benchmarking"](https://epoch.ai/benchmarks) archive and needs no key, so it is the default evaluation source. Each benchmark contributes one percentile computed inside a 540-day reference window (`market.epoch.reference_window_days`); an axis with fewer than three scored benchmarks stays empty (`market.epoch.min_benchmarks`). The two axes are `intelligence_reasoning` and `intelligence_coding`, and `intelligence` is the equal-weight mean of the axes a model has. Artificial Analysis takes precedence when `ARTIFICIAL_ANALYSIS_API_KEY` is set. Without either source the mesh computes a labelled heuristic from the existing discovery score, the price percentile, the reasoning flag and the release date.
 
-`hmesh market refresh` writes a snapshot to `.harness-mesh/state.db`. The default lifetime is six hours. Artificial Analysis is cached for at least twelve hours and limited to 20 requests per process per day. A failed refresh keeps the previous snapshot and marks it stale. Cached data older than seven days still works and is flagged expired.
+The heuristic is not an evaluation. Every score carries `intelligence_source`: `epoch_ai`, `artificial_analysis`, `override` or `heuristic`. `hmesh market show` and the `get_model_market` MCP tool print that field.
+
+Epoch AI data is CC BY 4.0 and requires attribution. `hmesh market show` ends with `Benchmark data: Epoch AI, 'Capabilities & benchmarking', https://epoch.ai/benchmarks (CC BY 4.0)`; `--json` carries the same string in `attribution`, and every routing decision includes it.
+
+`hmesh market refresh` writes a snapshot to `.harness-mesh/state.db`. The default lifetime is six hours. Epoch AI and Artificial Analysis are cached for at least twelve hours; Artificial Analysis is also limited to 20 requests per process per day. A failed refresh keeps the previous snapshot and marks it stale. Cached data older than seven days still works and is flagged expired.
 
 `market.enabled: false` or `HARNESS_MESH_OFFLINE=1` stops every outbound request. Dispatch reads only the cache, so a slow or unreachable source never delays a ticket.
 
@@ -257,6 +262,8 @@ The heuristic is not an evaluation. Every score carries `intelligence_source`: `
 
 `blended_price = (3 * input + output) / 4` in USD per million tokens. A model with no known price is left out of price comparisons and used only when nothing else qualifies.
 
+`routing.axis_weights` decides which evaluation axis a task kind is scored on: `plan`, `audit` and `review` use reasoning 0.7 / coding 0.3; `implement`, `refactor`, `debug` and `test` use coding 0.7 / reasoning 0.3; `docs` uses reasoning 1.0. When a model has only one axis, that axis carries full weight.
+
 Claude Code and Codex bill through a subscription quota rather than per token. The router uses the API list price as a proxy for quota consumption and states that in every decision record.
 
 ### Routing modes
@@ -269,11 +276,11 @@ When no market snapshot exists, no harness model matches the catalogue, or the p
 
 ### Decision record
 
-Every result carries a `routing` object: mode, task kind, tier, chosen harness/model/effort, intelligence and its source, list prices, the top three alternatives with scores, the data sources, `fetched_at`, `stale`, `expired` and the match confidence. The same block appears at the top of the transcript.
+Every result carries a `routing` object: mode, task kind, tier, chosen harness/model/effort, intelligence and its source, `axis_scores` (both axis scores with the weights used), `benchmarks_used`, the attribution string, list prices, the top three alternatives with scores, the data sources, `fetched_at`, `stale`, `expired` and the match confidence. The same block appears at the top of the transcript.
 
 ### Not connected
 
-The Aider polyglot leaderboard has no data after 2025-10. The community LMArena snapshot (`oolong-tea-2026/arena-ai-leaderboards`) has returned empty `leaderboards` every day since 2026-10-20. Neither source is used.
+The Aider polyglot leaderboard has no data after 2025-10. The community LMArena snapshot (`oolong-tea-2026/arena-ai-leaderboards`) has returned empty `leaderboards` every day since 2026-10-20. `api.llm-stats.com` returns vendor-reported scores marked `verified: false`, only four models carry an AA-Index, and its terms page returns 404. None of the three is used.
 
 ## MCP tools (15)
 
@@ -305,7 +312,7 @@ hmesh models [--refresh] [--harness H]
 hmesh quota [--probe]
 hmesh route --objective O [--kind K] [--difficulty D] [--harness H] [--json]
 hmesh market refresh [--source S]... [--json]
-hmesh market show [--model GLOB] [--unmatched] [--json]
+hmesh market show [--model GLOB] [--axis reasoning|coding] [--unmatched] [--json]
 hmesh skills [--query Q]
 hmesh dispatch --harness H --objective O [--difficulty D] [--kind K] [--routing-mode M] [--fallback H]...
 hmesh tasks [--status S]
@@ -340,11 +347,17 @@ Key settings:
 | `difficulty_timeout_seconds` | `600/1200/1800/3600` | Per-tier assignment timeout |
 | `market.enabled` | `true` | Read-only market data and its snapshot cache |
 | `market.ttl_seconds` | `21600` | Snapshot lifetime for OpenRouter and models.dev |
-| `market.sources` | three sources | Providers to refresh |
+| `market.sources` | four sources | Providers to refresh |
+| `market.first_party_providers` | `[]` (the example config lists ten) | Vendors whose own models.dev entry sets the list price |
+| `market.epoch.reasoning_benchmarks` | six benchmarks | Benchmarks that feed the reasoning axis |
+| `market.epoch.coding_benchmarks` | nine benchmarks | Benchmarks that feed the coding axis |
+| `market.epoch.reference_window_days` | `540` | Percentile window before a benchmark's latest release |
+| `market.epoch.min_benchmarks` | `3` | Minimum scored benchmarks before an axis counts |
 | `market.aliases` | `{}` | Map a harness model id or glob to a market key |
 | `market.overrides` | `{}` | Glob-keyed intelligence and price overrides |
 | `routing.mode` | `auto` | `auto`, `manual` or `off`; `HARNESS_MESH_ROUTING` wins |
 | `routing.floors` | `0.55/0.70` | Value-tier intelligence floor by difficulty |
+| `routing.axis_weights` | per task kind | Reasoning/coding weights used to score a task |
 | `routing.premium_hints` / `routing.value_hints` | `[]` | Model globs weighted per tier |
 | `routing.strict_hints` | `false` | Turn hint weighting into a filter |
 | `routing.pins` | `{}` | Fixed harness/model per task kind |

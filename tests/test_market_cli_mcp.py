@@ -518,3 +518,119 @@ async def test_background_refresh_is_disabled_offline(tmp_path):
         assert mesh.router.market.start_background_refresh() is None
     finally:
         mesh.storage.close()
+
+
+# ---------------------------------------------------------------------------
+# axis columns and attribution
+# ---------------------------------------------------------------------------
+
+
+def test_market_show_prints_the_epoch_attribution(tmp_path, monkeypatch):
+    mesh = make_mesh(tmp_path)
+    model = _model("anthropic/claude-opus-5-5", intelligence=88.0)
+    model.benchmarks_used = ["gpqa_diamond", "cursorbench_external"]
+    model.benchmark_data_date = "2026-10-26"
+    _seed_market(mesh, [model])
+    try:
+        text = _plain(
+            _invoke(monkeypatch, lambda: make_mesh(tmp_path), "market", "show").output
+        )
+        assert (
+            "Benchmark data: Epoch AI, 'Capabilities & benchmarking', "
+            "https://epoch.ai/benchmarks (CC BY 4.0)" in text
+        )
+        assert "bench=2" in text
+        assert "data=2026-10-26" in text
+
+        payload = json.loads(
+            _plain(
+                _invoke(monkeypatch, lambda: make_mesh(tmp_path), "market", "show", "--json").output
+            )
+        )
+        assert payload["attribution"].startswith("Benchmark data: Epoch AI")
+    finally:
+        mesh.storage.close()
+
+
+def test_market_show_axis_sorts_and_labels_the_selected_axis(tmp_path, monkeypatch):
+    mesh = make_mesh(tmp_path)
+    now = time.time()
+    models = [
+        _model("vendor/weak", intelligence=60.0),
+        _model("vendor/strong", intelligence=70.0),
+    ]
+    models[0].intelligence_reasoning = 10.0
+    models[0].intelligence_coding = 90.0
+    models[1].intelligence_reasoning = 80.0
+    models[1].intelligence_coding = 20.0
+    mesh.storage.save_market_snapshot(
+        "artificial_analysis",
+        now,
+        {"models": [model.model_dump(mode="json") for model in models], "fetched_at": now},
+    )
+    try:
+        def factory():
+            return make_mesh(tmp_path)
+
+        payload = json.loads(
+            _plain(
+                _invoke(
+                    monkeypatch, factory, "market", "show", "--axis", "reasoning", "--json"
+                ).output
+            )
+        )
+        assert [item["key"] for item in payload["models"]] == [
+            "vendor/strong",
+            "vendor/weak",
+        ]
+        assert payload["axis"] == "reasoning"
+
+        text = _plain(
+            _invoke(monkeypatch, factory, "market", "show", "--axis", "coding").output
+        )
+        assert "vendor/weak" in text
+        assert "coding= 90.0" in text
+    finally:
+        mesh.storage.close()
+
+
+def test_market_show_rejects_an_unknown_axis(tmp_path, monkeypatch):
+    mesh = make_mesh(tmp_path)
+    try:
+        result = _invoke(
+            monkeypatch,
+            lambda: make_mesh(tmp_path),
+            "market",
+            "show",
+            "--axis",
+            "speed",
+        )
+        assert result.exit_code != 0
+        assert "reasoning" in _plain(result.output)
+    finally:
+        mesh.storage.close()
+
+
+def test_route_json_carries_the_attribution(tmp_path, monkeypatch):
+    adapter = FakeAdapter("claude_code", lambda adapter, call: success("should not run"))
+    mesh = make_mesh(tmp_path, adapters={"claude_code": adapter})
+    _seed_market(mesh, [_model("anthropic/claude-opus-5-5", intelligence=88.0)])
+    _seed_models(mesh, [_discovered("claude_code", "claude-opus-5-5")])
+    try:
+        payload = json.loads(
+            _plain(
+                _invoke(
+                    monkeypatch,
+                    lambda: make_mesh(tmp_path, adapters={"claude_code": adapter}),
+                    "route",
+                    "--objective",
+                    "Design the release plan",
+                    "--kind",
+                    "plan",
+                    "--json",
+                ).output
+            )
+        )
+        assert payload["routing"]["attribution"].startswith("Benchmark data: Epoch AI")
+    finally:
+        mesh.storage.close()

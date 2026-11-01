@@ -290,6 +290,7 @@ def test_decision_contains_no_secret_and_has_every_documented_field():
         "reasons",
         "axis_scores",
         "benchmarks_used",
+        "attribution",
         "data",
     }
     assert set(payload["chosen"]) == {

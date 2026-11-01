@@ -226,13 +226,18 @@ Harness-Mesh 可以按公开标价和评测分给模型排序，不必只依赖�
 | :--- | :--- | :--- |
 | OpenRouter `/api/v1/models` | 无 | 每 token 标价、上下文窗口、推理与工具标志 |
 | models.dev `/api.json` | 无 | 每百万 token 标价、上下文窗口、发布日期 |
+| Epoch AI `benchmark_data.zip` | 无 | 推理与编码基准分位、基准日期 |
 | Artificial Analysis `/api/v2/language/models/free` | `ARTIFICIAL_ANALYSIS_API_KEY` | 智能指数、标价、输出速度 |
 
-两家都认识同一模型时，OpenRouter 的价格优先。评测分只来自 Artificial Analysis 或用户覆盖。没有配置密钥时，用现有发现分数、价格分位、推理标志和发布日期算出启发式分数。
+models.dev 按提供商逐条列出同一个模型，其中包含几百个转售平台。这些条目按模型名折叠成一个规范模型。价格依次取模型原厂的条目（列在 `market.first_party_providers`）、OpenRouter、全部有效报价的中位数。输入与输出都为 0 的条目不当作免费，记为价格未知。
 
-启发式分数不是评测分。每个分数都带 `intelligence_source`，取值为 `artificial_analysis`、`override` 或 `heuristic`；`hmesh market show` 与 `get_model_market` MCP 工具都会显示该字段。
+Epoch AI 以 CC BY 4.0 发布 [Capabilities & benchmarking](https://epoch.ai/benchmarks) 数据，不需要密钥，因此是默认的评测来源。每个基准在 540 天参考窗口内折算成一个百分位（`market.epoch.reference_window_days`）；某个轴的有效基准少于三个时留空（`market.epoch.min_benchmarks`）。两条轴分别是 `intelligence_reasoning` 与 `intelligence_coding`，`intelligence` 取模型已有轴的等权平均。配置了 `ARTIFICIAL_ANALYSIS_API_KEY` 时 Artificial Analysis 优先。两个来源都没有时，用现有发现分数、价格分位、推理标志和发布日期算出启发式分数。
 
-`hmesh market refresh` 把快照写入 `.harness-mesh/state.db`。默认缓存 6 小时；Artificial Analysis 至少缓存 12 小时，每个进程每天最多请求 20 次。刷新失败保留旧快照并标记 stale；超过 7 天的缓存仍可用，同时标记 expired。
+启发式分数不是评测分。每个分数都带 `intelligence_source`，取值为 `epoch_ai`、`artificial_analysis`、`override` 或 `heuristic`；`hmesh market show` 与 `get_model_market` MCP 工具都会显示该字段。
+
+Epoch AI 数据采用 CC BY 4.0，需要署名。`hmesh market show` 末尾固定输出 `Benchmark data: Epoch AI, 'Capabilities & benchmarking', https://epoch.ai/benchmarks (CC BY 4.0)`；`--json` 把同一字符串放在 `attribution` 字段，每条路由决策也带该字段。
+
+`hmesh market refresh` 把快照写入 `.harness-mesh/state.db`。默认缓存 6 小时；Epoch AI 与 Artificial Analysis 至少缓存 12 小时，Artificial Analysis 每个进程每天最多请求 20 次。刷新失败保留旧快照并标记 stale；超过 7 天的缓存仍可用，同时标记 expired。
 
 `market.enabled: false` 或 `HARNESS_MESH_OFFLINE=1` 会关闭全部外发请求。派发只读缓存，来源变慢或不可达不会拖住工单。
 
@@ -248,6 +253,8 @@ Harness-Mesh 可以按公开标价和评测分给模型排序，不必只依赖�
 
 `blended_price = (3 * input + output) / 4`，单位为美元每百万 token。价格未知的模型不参与价格比较，只在没有别的候选时使用。
 
+`routing.axis_weights` 决定任务类型落在哪条评测轴上：`plan`、`audit`、`review` 用推理 0.7 / 编码 0.3；`implement`、`refactor`、`debug`、`test` 用编码 0.7 / 推理 0.3；`docs` 用推理 1.0。模型只有一条轴时，该轴按全权重计算。
+
 Claude Code 与 Codex 走订阅额度，不按 token 单独计费。路由把 API 标价当作额度消耗的代理值，并在每条决策记录里注明。
 
 ### 路由模式
@@ -260,11 +267,11 @@ Claude Code 与 Codex 走订阅额度，不按 token 单独计费。路由把 AP
 
 ### 决策记录
 
-每个结果都带 `routing` 字段：模式、任务类型、档位、选中的 Harness/模型/推理档、智能分与来源、标价、前三名备选及得分、数据来源、`fetched_at`、`stale`、`expired`、匹配置信度。同一段内容出现在转录开头。
+每个结果都带 `routing` 字段：模式、任务类型、档位、选中的 Harness/模型/推理档、智能分与来源、`axis_scores`（两条轴的分数与权重）、`benchmarks_used`、署名、标价、前三名备选及得分、数据来源、`fetched_at`、`stale`、`expired`、匹配置信度。同一段内容出现在转录开头。
 
 ### 未接入的来源
 
-Aider polyglot 排行榜在 2025-10 之后没有新数据；社区维护的 LMArena 快照（`oolong-tea-2026/arena-ai-leaderboards`）从 2026-10-20 起每天返回空的 `leaderboards`。这两个来源都没有接入。
+Aider polyglot 排行榜在 2025-10 之后没有新数据；社区维护的 LMArena 快照（`oolong-tea-2026/arena-ai-leaderboards`）从 2026-10-20 起每天返回空的 `leaderboards`；`api.llm-stats.com` 的分数多为厂商自报（`verified: false`），带 AA-Index 的只有 4 个模型，服务条款页返回 404。三个来源都没有接入。
 
 ## MCP 工具（15 个）
 
@@ -280,6 +287,9 @@ hmesh doctor [--harness H] [--json]
 hmesh status [--refresh] [--json]
 hmesh models [--refresh] [--harness H]
 hmesh quota [--probe]
+hmesh route --objective O [--kind K] [--difficulty D] [--harness H] [--json]
+hmesh market refresh [--source S]... [--json]
+hmesh market show [--model GLOB] [--axis reasoning|coding] [--unmatched] [--json]
 hmesh skills [--query Q]
 hmesh dispatch --harness H --objective O [--difficulty D] [--fallback H]...
 hmesh tasks [--status S]
@@ -302,11 +312,17 @@ hmesh init-mcp [--print] [--target PATH]
 | :--- | :--- | :--- |
 | `market.enabled` | `true` | 只读市场数据与快照缓存 |
 | `market.ttl_seconds` | `21600` | OpenRouter 与 models.dev 的缓存时长 |
-| `market.sources` | 三个来源 | 需要刷新的来源 |
+| `market.sources` | 四个来源 | 需要刷新的来源 |
+| `market.first_party_providers` | `[]`（示例配置列出十个） | 用自家 models.dev 条目定标价的厂商 |
+| `market.epoch.reasoning_benchmarks` | 六个基准 | 推理轴使用的基准 |
+| `market.epoch.coding_benchmarks` | 九个基准 | 编码轴使用的基准 |
+| `market.epoch.reference_window_days` | `540` | 基准最新发布日期之前的百分位窗口 |
+| `market.epoch.min_benchmarks` | `3` | 一条轴至少要有几个有效基准 |
 | `market.aliases` | `{}` | 把 Harness 模型 id 或 glob 映射到市场键 |
 | `market.overrides` | `{}` | 按 glob 覆盖智能分与价格 |
 | `routing.mode` | `auto` | `auto`、`manual` 或 `off`；`HARNESS_MESH_ROUTING` 优先 |
 | `routing.floors` | `0.55/0.70` | value 档按难度取的智能分下限 |
+| `routing.axis_weights` | 按任务类型 | 给任务打分时推理轴与编码轴的权重 |
 | `routing.premium_hints` / `routing.value_hints` | `[]` | 按档位加权的模型 glob |
 | `routing.strict_hints` | `false` | 把加权改为硬过滤 |
 | `routing.pins` | `{}` | 按任务类型固定 Harness/模型 |
