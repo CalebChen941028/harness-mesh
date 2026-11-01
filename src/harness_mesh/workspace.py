@@ -32,6 +32,7 @@ class WorktreeInfo:
     branch: str
     reused: bool = False
     baseline_commit: str | None = None
+    escaping_symlinks: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -415,11 +416,18 @@ class WorkspaceManager:
             self._commit_worktree_baseline(task_id, path, "harness-mesh: baseline sync")
         head = self._git(["rev-parse", "HEAD"], cwd=path)
         info.baseline_commit = head.stdout.strip() if head.returncode == 0 else None
+        info.escaping_symlinks = self._normalize_worktree_symlinks(path)
         self._write_baseline_marker(info)
         return info
 
-    def _recreate_symlink(self, source: Path, destination: Path, source_root: Path) -> bool:
-        """Recreate an internal symlink, never copying its target's content."""
+    def _recreate_symlink(
+        self,
+        source: Path,
+        destination: Path,
+        source_root: Path,
+        destination_root: Path,
+    ) -> bool:
+        """Recreate an internal symlink as a relative link inside the destination."""
 
         if not source.is_symlink() or not source.exists():
             logger.warning("skipping symlink %s: dangling or missing target", source)
@@ -432,10 +440,16 @@ class WorkspaceManager:
         if is_sensitive_path(resolved):
             logger.warning("skipping symlink %s: target name is sensitive", source)
             return False
-        if not self._is_relative_to(resolved, source_root.resolve()):
+        try:
+            relative_target = resolved.relative_to(source_root.resolve())
+        except ValueError:
             logger.warning("skipping symlink %s: target escapes source workspace", source)
             return False
-        link_target = os.readlink(source)
+        destination_target = destination_root.resolve() / relative_target
+        if not self._is_relative_to(destination_target, destination_root.resolve()):
+            logger.warning("skipping symlink %s: destination target escapes workspace", source)
+            return False
+        link_target = os.path.relpath(destination_target, destination.parent)
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.is_symlink() or destination.exists():
             if destination.is_dir() and not destination.is_symlink():
@@ -443,6 +457,40 @@ class WorkspaceManager:
             destination.unlink()
         os.symlink(link_target, destination)
         return True
+
+    def _normalize_worktree_symlinks(self, worktree_path: Path) -> list[str]:
+        """Rewrite absolute links inside the worktree and report escaping links."""
+
+        worktree_root = worktree_path.resolve()
+        primary_root = self.workspace_root.resolve()
+        escaping: list[str] = []
+        for entry in sorted(worktree_path.rglob("*")):
+            if not entry.is_symlink():
+                continue
+            if not entry.exists():
+                escaping.append(entry.relative_to(worktree_path).as_posix())
+                continue
+            try:
+                resolved = entry.resolve(strict=False)
+            except OSError:
+                escaping.append(entry.relative_to(worktree_path).as_posix())
+                continue
+            if self._is_relative_to(resolved, worktree_root):
+                raw_target = os.readlink(entry)
+                if Path(raw_target).is_absolute():
+                    entry.unlink()
+                    os.symlink(os.path.relpath(resolved, entry.parent), entry)
+                continue
+            if self._is_relative_to(resolved, primary_root) and not is_sensitive_path(resolved):
+                relative_target = resolved.relative_to(primary_root)
+                destination_target = worktree_root / relative_target
+                entry.unlink()
+                os.symlink(os.path.relpath(destination_target, entry.parent), entry)
+                continue
+            relative = entry.relative_to(worktree_path).as_posix()
+            escaping.append(relative)
+            logger.warning("worktree symlink escapes workspace: %s", relative)
+        return sorted(set(escaping))
 
     def _sync_uncommitted_changes(self, worktree_path: Path) -> None:
         """Copy the primary checkout's uncommitted state into a new worktree.
@@ -470,7 +518,7 @@ class WorkspaceManager:
                 src = self.workspace_root / relative
                 dst = worktree_path / relative
                 if src.is_symlink():
-                    self._recreate_symlink(src, dst, self.workspace_root)
+                    self._recreate_symlink(src, dst, self.workspace_root, worktree_path)
                 elif src.is_file():
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(src, dst)
@@ -487,7 +535,7 @@ class WorkspaceManager:
             src = self.workspace_root / relative
             dst = worktree_path / relative
             if src.is_symlink():
-                self._recreate_symlink(src, dst, self.workspace_root)
+                self._recreate_symlink(src, dst, self.workspace_root, worktree_path)
             elif src.is_file():
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dst)
@@ -739,6 +787,7 @@ class WorkspaceManager:
             return ApplyResult(task_id=task_id, strategy=strategy, detail="already in the primary workspace")
         self._verify_git_guard(task_id)
         changes = self.collect_changes(source)
+        self._check_diff_symlinks(changes.diff, source, target)
         if strategy == "copy":
             applied = self._copy_changes(source, target, changes.modified_files)
             return ApplyResult(
@@ -807,6 +856,39 @@ class WorkspaceManager:
                     conflicts.append(name)
         return conflicts
 
+    def _check_diff_symlinks(self, diff: str, source: Path, target_root: Path) -> None:
+        path: str | None = None
+        symlink_mode = False
+        for line in diff.splitlines():
+            if line.startswith("diff --git "):
+                path = None
+                symlink_mode = False
+                continue
+            if line.startswith("new file mode 120000") or (
+                line.startswith("index ") and "120000" in line
+            ):
+                symlink_mode = True
+                continue
+            if line.startswith("+++ b/"):
+                path = line[6:].strip()
+                continue
+            if not symlink_mode or path is None or not line.startswith("+"):
+                continue
+            raw_target = line[1:].strip()
+            target_path = Path(raw_target)
+            if not target_path.is_absolute():
+                target_path = (source / path).parent / target_path
+            try:
+                resolved = target_path.resolve(strict=False)
+            except OSError:
+                resolved = target_path
+            if not self._is_relative_to(resolved, target_root.resolve()):
+                raise WorkspaceError(
+                    f"symlink {path} points outside the target workspace: {raw_target}"
+                )
+            path = None
+            symlink_mode = False
+
     def _copy_changes(self, source: Path, target: Path, files: Iterable[str]) -> list[str]:
         applied: list[str] = []
         target_resolved = target.resolve()
@@ -819,7 +901,7 @@ class WorkspaceManager:
             src_path = source / rel_path
             dst_path = target / rel_path
             if src_path.is_symlink():
-                if self._recreate_symlink(src_path, dst_path, source):
+                if self._recreate_symlink(src_path, dst_path, source, target):
                     applied.append(relative)
                 continue
             src = src_path.resolve()

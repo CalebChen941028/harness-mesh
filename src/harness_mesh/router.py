@@ -232,6 +232,7 @@ class MeshRouter:
             if isinstance(request.workspace_mode, WorkspaceMode)
             else WorkspaceMode(request.workspace_mode)
         )
+        worktree_warnings: list[str] = []
         if mode in {WorkspaceMode.ISOLATED_WORKTREE, WorkspaceMode.READ_ONLY}:
             # READ_ONLY also runs in a disposable worktree so a misbehaving
             # agent can never mutate the primary workspace; its changes are
@@ -248,6 +249,9 @@ class MeshRouter:
             workdir = info.path
             worktree_path = str(info.path)
             worktree_branch = info.branch
+            worktree_warnings = [
+                f"escaping symlink: {path}" for path in info.escaping_symlinks
+            ]
         else:
             workdir = root
             worktree_path = None
@@ -930,7 +934,10 @@ class MeshRouter:
             modified_files=changes.modified_files,
             git_diff=diff_preview,
             git_diff_truncated=diff_truncated,
-            warnings=[f"skipped sensitive file: {path}" for path in changes.skipped_sensitive],
+            warnings=[
+                *worktree_warnings,
+                *[f"skipped sensitive file: {path}" for path in changes.skipped_sensitive],
+            ],
             transcript_text=transcript_text,
         )
         self.storage.save_resource(request.task_id, "diff", changes.diff or "")
