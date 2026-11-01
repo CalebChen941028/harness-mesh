@@ -921,7 +921,6 @@ def market_show(
             f"data={item.benchmark_data_date or '-'} "
             f"ctx={item.context_window or '-'}{axis_column}"
         )
-    typer.echo(EPOCH_ATTRIBUTION)
     if payload["stale"]:
         typer.echo("cache is stale; refresh it when the network is available")
     if unmatched:
@@ -936,6 +935,8 @@ def market_show(
                 f"unmatched {entry['harness']:14} {entry['model_id']}{effort} "
                 f"confidence={entry.get('confidence', 'none')} -> add market.aliases"
             )
+    # The attribution is always the final line of the text output.
+    typer.echo(EPOCH_ATTRIBUTION)
 
 
 @app.command()

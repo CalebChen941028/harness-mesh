@@ -541,6 +541,20 @@ def test_market_show_prints_the_epoch_attribution(tmp_path, monkeypatch):
         )
         assert "bench=2" in text
         assert "data=2026-10-26" in text
+        assert text.strip().splitlines()[-1].startswith("Benchmark data: Epoch AI")
+
+        with_unmatched = _plain(
+            _invoke(
+                monkeypatch,
+                lambda: make_mesh(tmp_path),
+                "market",
+                "show",
+                "--unmatched",
+            ).output
+        )
+        assert with_unmatched.strip().splitlines()[-1].startswith(
+            "Benchmark data: Epoch AI"
+        )
 
         payload = json.loads(
             _plain(
