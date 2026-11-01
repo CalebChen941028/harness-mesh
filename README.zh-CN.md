@@ -10,7 +10,7 @@ Harness-Mesh 是本地编排层，交付形态有四个：
 
 - Python 包 `harness_mesh`：类型化数据模型和 SQLite 状态账本；
 - 命令行 `hmesh`：查看状态、发现模型、派发任务、管理共享上下文、合入补丁；
-- stdio MCP 服务端 `hmesh-mcp`：向主控 Harness 暴露 15 个工具；
+- stdio MCP 服务端 `hmesh-mcp`：向主控 Harness 暴露 18 个工具；
 - 本地运行目录 `.harness-mesh/`：状态库、Worktree、分页资源。
 
 它不提供模型、不运营云端服务、不带 Web UI 或多租户调度。模型调用由本机已安装并登录的 Harness CLI 完成；Harness-Mesh 只在本地记录状态，并把裁剪后的摘要返回给主控端。
@@ -78,7 +78,7 @@ hmesh install
 ```bash
 hmesh install --dry-run                 # 只显示计划执行的命令/文件，不修改任何配置
 hmesh install --yes                     # 非交互确认后安装
-hmesh install --approve read            # 预先批准 9 个只读 MCP 工具
+hmesh install --approve read            # 预先批准 11 个只读 MCP 工具
 hmesh install --harness zcode           # 只安装一个 Harness（可重复）
 hmesh install --workspace /path/project # 显式绑定 MCP 工作区
 hmesh install --uninstall               # 卸载集成
@@ -91,13 +91,13 @@ hmesh install --uninstall               # 卸载集成
 交互式会话在调用 MCP 工具前会询问。`codex exec`、`agy -p` 这类无界面命令无法回答，`hmesh install` 因此按工具写入放行规则：
 
 ```bash
-hmesh install --approve dispatch   # 默认：12 个只读与调度工具
-hmesh install --approve read       # 9 个只读工具
-hmesh install --approve all        # 全部 15 个
+hmesh install --approve dispatch   # 默认：14 个只读与调度工具
+hmesh install --approve read       # 11 个只读工具
+hmesh install --approve all        # 全部 18 个
 hmesh install --approve none       # 不写入，并清掉本工具写过的规则
 ```
 
-默认级别 `dispatch` 批准 9 个只读工具，以及 `dispatch_task`、`parallel_dispatch`、`cancel_task`。派发任务在隔离 Worktree 内运行，改动要经过 `apply_task_patch` 才进入主工作区。三个写入工具仍默认人工批准：`apply_task_patch`、`report_quota_status`、`update_project_context` 会改动主工作区或共享状态。确实需要时用 `--approve all` 一并放行。
+默认级别 `dispatch` 批准 11 个只读工具，以及 `dispatch_task`、`parallel_dispatch`、`cancel_task`。派发任务在隔离 Worktree 内运行，改动要经过 `apply_task_patch` 才进入主工作区。四个写入工具仍默认人工批准：`apply_task_patch`、`report_quota_status`、`update_project_context`、`install_integration` 会改动主工作区、共享状态或其他应用的配置。确实需要时用 `--approve all` 一并放行。
 
 | Harness | 文件 | 规则 |
 | :--- | :--- | :--- |
@@ -113,6 +113,22 @@ hmesh install --approve none       # 不写入，并清掉本工具写过的规�
 ZCode 的 `--scope project` 仍会写入全局状态文件 `~/.zcode/cli/plugins/known_marketplaces.json` 与 `installed_plugins.json`，插件本身和缓存则按项目隔离。`hmesh install --uninstall` 会清除这两处记录；手工清理时对应命令为 `zcode plugins uninstall` 与 `zcode plugins marketplace remove`。
 
 安装后重启对应桌面应用，并新建会话/任务；旧会话可能缓存旧工具列表。安装器是幂等的：重复执行会替换已有注册，不会产生重复 DSH 条目。
+
+### 之后又安装新的 Harness
+
+Claude Code 与 Codex 常先装好，ZCode 或其他受支持 Harness 可能后装。两种角色处理不同。
+
+**Worker。** 不需要操作。每次派发都会重新解析二进制，路由也会重新检查适配器可用性，下一张工单就能用上新 Harness。只有模型清单缓存 5 分钟。
+
+**控制端。** 该 Harness 必须先注册 Mesh 的 MCP 服务或插件，才能调用这些工具。Mesh 只报告缺口，决定权留给你：
+
+- `hmesh integrations` 把每个已配置 Harness 列为 `integrated`、`detected_not_integrated`、`stale`（已注册但命令不再可用）、`not_detected` 或 `ignored`；
+- `hmesh doctor` 与 `hmesh status` 末尾用一行指出检测到的 Harness 和安装命令；
+- 在主控对话里，`list_harnesses` 会带上 `integration_hints`。Agent 先说明提示，调用 `plan_integration` 展示将写入的文件、批准条目和命令，得到你同意后才调用 `install_integration`。
+
+`plan_integration` 返回 `plan_id`：把规范化计划与目标文件当前内容做 SHA-256，取前 16 位十六进制字符。`install_integration` 会重新计算计划，id 不一致就拒绝；审阅之后有人改了配置文件，必须重新审阅。它属于 `write` 类，默认级别 `dispatch` 下留给人工批准。Worker 会被与嵌套派发相同的谱系解析拒绝，`HARNESS_MESH_READ_ONLY=1` 也会阻止安装；目标 Harness 需要重启才会出现新工具。
+
+`hmesh integrations ignore zcode` 停止提示，`unignore` 恢复。命令只写 Mesh 配置里的 `integration.ignore`，不会改动其他应用的配置。
 
 ## 快速开始
 
@@ -283,11 +299,11 @@ Claude Code 与 Codex 走订阅额度，不按 token 单独计费。路由把 AP
 
 Aider polyglot 排行榜在 2025-10 之后没有新数据；社区维护的 LMArena 快照（`oolong-tea-2026/arena-ai-leaderboards`）从 2026-10-20 起每天返回空的 `leaderboards`；`api.llm-stats.com` 的分数多为厂商自报（`verified: false`），带 AA-Index 的只有 4 个模型，服务条款页返回 404。三个来源都没有接入。
 
-## MCP 工具（15 个）
+## MCP 工具（18 个）
 
-`list_harnesses`、`discover_harness_models`、`list_skills_and_plugins`、`dispatch_task`、`parallel_dispatch`、`get_task_status`、`read_task_resource`、`get_quota_status`、`report_quota_status`、`apply_task_patch`、`cancel_task`、`get_project_context`、`update_project_context`。
+`list_harnesses`、`discover_harness_models`、`get_model_market`、`preview_routing`、`list_skills_and_plugins`、`dispatch_task`、`parallel_dispatch`、`get_task_status`、`read_task_resource`、`get_quota_status`、`report_quota_status`、`apply_task_patch`、`cancel_task`、`get_project_context`、`update_project_context`、`get_integration_status`、`plan_integration`、`install_integration`。
 
-`dispatch_task` 返回的 `git_diff` 是预览，完整内容通过 `read_pointers` 和 `read_task_resource` 分页读取。
+`dispatch_task` 返回的 `git_diff` 是预览，完整内容通过 `read_pointers` 和 `read_task_resource` 分页读取。`get_integration_status` 读取状态，`plan_integration` 生成可审阅的计划，`install_integration` 在 `plan_id` 校验通过后写入；最后一个属于写入类，Worker 与只读模式会被拒绝。
 
 ## CLI
 
@@ -295,6 +311,8 @@ Aider polyglot 排行榜在 2025-10 之后没有新数据；社区维护的 LMAr
 hmesh install [--dry-run] [--yes] [--approve LEVEL] [--harness H]... [--uninstall]
 hmesh doctor [--harness H] [--json]
 hmesh status [--refresh] [--json]
+hmesh integrations [--json]
+hmesh integrations ignore|unignore NAME [--json]
 hmesh models [--refresh] [--harness H]
 hmesh quota [--probe]
 hmesh route --objective O [--kind K] [--difficulty D] [--harness H] [--json]
@@ -337,6 +355,7 @@ hmesh init-mcp [--print] [--target PATH]
 | `routing.premium_hints` / `routing.value_hints` | `[]` | 按档位加权的模型 glob |
 | `routing.strict_hints` | `false` | 把加权改为硬过滤 |
 | `routing.pins` | `{}` | 按任务类型固定 Harness/模型 |
+| `integration.ignore` | `[]` | 不显示集成提示的 Harness 名单 |
 
 ## 测试
 
