@@ -836,18 +836,20 @@ def match_model(
                 )
             return ModelMatch(confidence="none", effort_variant=effort)
 
-    # 1. exact raw identity (case-insensitive, brackets removed, vendor optional)
-    exact_targets: list[str] = []
-    lowered = _BRACKETS.sub("", _text(model_id, 300).lower()).strip()
+    # A model whose real name ends in ``-max`` (for example ``qwen3.8-max``)
+    # must not be mistaken for an effort suffix.  Check the untouched identity
+    # before extracting a reasoning level.
+    untouched = _BRACKETS.sub("", _text(model_id, 300).lower()).strip()
+    untouched_targets: list[str] = []
     for model in models:
         identities, _ = _market_identities(model)
-        if lowered in identities:
-            exact_targets.append(model.key)
-    exact_targets = list(dict.fromkeys(exact_targets))
-    if len(exact_targets) == 1:
-        return _match(exact_targets[0], by_key, "exact", effort)
-    if len(exact_targets) > 1:
-        return ModelMatch(confidence="none", effort_variant=effort)
+        if untouched in identities:
+            untouched_targets.append(model.key)
+    untouched_targets = list(dict.fromkeys(untouched_targets))
+    if len(untouched_targets) == 1:
+        return _match(untouched_targets[0], by_key, "exact", None)
+    if len(untouched_targets) > 1:
+        return ModelMatch(confidence="none", effort_variant=None)
 
     # 2. normalised identity: dot/hyphen equivalence, 8-digit dates, effort
     normalized_name, _ = normalize_model_identity(model_id)
