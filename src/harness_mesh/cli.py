@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -61,6 +62,15 @@ def _runtime(ctx: typer.Context):
     )
 
 
+def _echo_install_results(results) -> None:
+    for result in results:
+        typer.echo(f"{result.harness:12} {result.action:12} {result.detail}")
+        for path in result.files:
+            typer.echo(f"  file: {path}")
+        for command in result.commands:
+            typer.echo(f"  cmd : {' '.join(command)}")
+
+
 @app.command()
 def install(
     ctx: typer.Context,
@@ -69,9 +79,63 @@ def install(
     ),
     uninstall: bool = typer.Option(False, "--uninstall", help="Remove the MCP/plugin integration."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show planned commands/files without changing anything."),
+    yes: bool = typer.Option(False, "--yes", help="Skip the interactive confirmation."),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
 ) -> None:
     """One-command installation of Harness-Mesh into every detected harness UI."""
+
+    options = ctx.obj or {}
+    workspace = options.get("workspace") or os.getcwd()
+    config_path = options.get("config")
+    config = load_config(config_path, workspace)
+
+    def build(dry: bool):
+        return HarnessInstaller(
+            config,
+            workspace,
+            config_path=config_path or find_config_path(workspace),
+            dry_run=dry,
+        )
+
+    planned = build(True).install(harness, uninstall=uninstall)
+    if json_output and dry_run:
+        typer.echo(_json([result.as_dict() for result in planned]))
+        return
+    if not json_output:
+        typer.echo("Planned changes:")
+        _echo_install_results(planned)
+    if dry_run:
+        return
+    if not yes:
+        if not sys.stdin.isatty():
+            typer.echo(
+                "Refusing to modify harness configuration in a non-interactive environment; "
+                "re-run with --yes or inspect with --dry-run.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if not typer.confirm("Apply these changes?"):
+            typer.echo("Cancelled.")
+            raise typer.Exit(code=0)
+    results = build(False).install(harness, uninstall=uninstall)
+    if json_output:
+        typer.echo(_json([result.as_dict() for result in results]))
+    else:
+        typer.echo("Result:")
+        _echo_install_results(results)
+    if any(result.action == "failed" for result in results):
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def doctor(
+    ctx: typer.Context,
+    harness: Optional[list[str]] = typer.Option(
+        None, "--harness", "-H", help="Check only this harness (repeatable)."
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Check registered MCP/plugin commands and their launch health."""
 
     options = ctx.obj or {}
     workspace = options.get("workspace") or os.getcwd()
@@ -81,19 +145,14 @@ def install(
         config,
         workspace,
         config_path=config_path or find_config_path(workspace),
-        dry_run=dry_run,
     )
-    results = installer.install(harness, uninstall=uninstall)
+    results = installer.doctor(harness)
     if json_output:
         typer.echo(_json([result.as_dict() for result in results]))
     else:
         for result in results:
-            typer.echo(f"{result.harness:12} {result.action:12} {result.detail}")
-            for path in result.files:
-                typer.echo(f"  file: {path}")
-            for command in result.commands:
-                typer.echo(f"  cmd : {' '.join(command)}")
-    if any(result.action == "failed" for result in results):
+            typer.echo(f"{result.harness:12} {result.status:14} {result.detail}")
+    if any(result.status == "failed" for result in results):
         raise typer.Exit(code=1)
 
 

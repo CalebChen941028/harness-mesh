@@ -1271,7 +1271,7 @@ def test_cli_init_mcp_and_help():
     assert help_result.exit_code == 0
     for command in (
         "status", "models", "quota", "skills", "dispatch", "tasks", "read", "apply",
-        "init-mcp", "context", "install",
+        "init-mcp", "context", "install", "doctor",
     ):
         assert command in help_result.output
 
