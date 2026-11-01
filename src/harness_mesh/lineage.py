@@ -20,6 +20,24 @@ from pathlib import Path
 from typing import Any
 
 
+def _workspace_from_cwd() -> str:
+    """Resolve a cwd inside a task worktree back to the primary project root.
+
+    Hosts may launch the MCP server or the CLI from
+    ``<project>/.harness-mesh/worktrees/<task_id>`` without forwarding
+    ``HARNESS_MESH_WORKSPACE``.  Treating that directory as a project would
+    open a second, empty ``state.db`` and lose the ledger that records the
+    parent assignment, so the path before ``.harness-mesh`` wins.
+    """
+
+    cwd = Path.cwd().resolve()
+    parts = cwd.parts
+    for index, part in enumerate(parts):
+        if part == ".harness-mesh" and index + 1 < len(parts) and parts[index + 1] == "worktrees":
+            return str(Path(*parts[:index]))
+    return str(cwd)
+
+
 def _env_int(name: str) -> int | None:
     value = os.environ.get(name)
     if not value:

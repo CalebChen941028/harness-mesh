@@ -120,12 +120,23 @@ def is_git_workspace(root: str | Path) -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
+def _is_task_worktree(target: Path) -> bool:
+    """True when the path is a task worktree or a directory inside one."""
+
+    parts = target.parts
+    return any(
+        part == ".harness-mesh" and index + 1 < len(parts) and parts[index + 1] == "worktrees"
+        for index, part in enumerate(parts)
+    )
+
+
 def ensure_service_workspace(root: str | Path, *, auto_init_repo: bool = False) -> Path:
     """Reject unsafe MCP/CLI startup workspaces.
 
     The service must run inside a Git repository and never from the home
     directory or filesystem root, where an automatic repository/baseline could
-    capture unrelated files.
+    capture unrelated files.  A task worktree is also refused: opening a
+    second state database there loses the shared ledger and its lineage.
     """
 
     target = Path(root).expanduser().resolve()
@@ -134,6 +145,11 @@ def ensure_service_workspace(root: str | Path, *, auto_init_repo: bool = False) 
         raise RuntimeError(
             "harness-mesh refuses to run from the filesystem root or your home directory; "
             "set HARNESS_MESH_WORKSPACE to a project directory"
+        )
+    if _is_task_worktree(target):
+        raise RuntimeError(
+            f"harness-mesh refuses to use a task worktree as the workspace root ({target}); "
+            "run from the project root, or set HARNESS_MESH_WORKSPACE to the project root"
         )
     if auto_init_repo:
         return target

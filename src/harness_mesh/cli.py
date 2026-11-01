@@ -13,7 +13,12 @@ import typer
 
 from .config import find_config_path, load_config
 from .installer import HarnessInstaller
-from .lineage import _effective_call_depth, _merge_trace_chain, _resolved_lineage
+from .lineage import (
+    _effective_call_depth,
+    _merge_trace_chain,
+    _resolved_lineage,
+    _workspace_from_cwd,
+)
 from .models import (
     QuotaExhaustedPolicy,
     TaskDifficulty,
@@ -52,16 +57,21 @@ def main(
 
     ctx.obj = {
         "config": config,
-        "workspace": workspace or os.environ.get("HARNESS_MESH_WORKSPACE") or os.getcwd(),
+        "workspace": workspace or os.environ.get("HARNESS_MESH_WORKSPACE") or _workspace_from_cwd(),
     }
 
 
 def _runtime(ctx: typer.Context):
     options = ctx.obj or {}
-    return create_mesh_runtime(
-        config_path=options.get("config"),
-        workspace_root=options.get("workspace") or os.getcwd(),
-    )
+    workspace = options.get("workspace") or _workspace_from_cwd()
+    try:
+        return create_mesh_runtime(
+            config_path=options.get("config"),
+            workspace_root=workspace,
+        )
+    except RuntimeError as exc:
+        typer.echo(f"Cannot start harness-mesh from this workspace: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
 
 def _trace_chain_option(raw: str | None) -> list[str] | None:
@@ -101,7 +111,7 @@ def install(
     """One-command installation of Harness-Mesh into every detected harness UI."""
 
     options = ctx.obj or {}
-    workspace = options.get("workspace") or os.getcwd()
+    workspace = options.get("workspace") or _workspace_from_cwd()
     config_path = options.get("config")
     config = load_config(config_path, workspace)
     try:
@@ -159,7 +169,7 @@ def doctor(
     """Check registered MCP/plugin commands and their launch health."""
 
     options = ctx.obj or {}
-    workspace = options.get("workspace") or os.getcwd()
+    workspace = options.get("workspace") or _workspace_from_cwd()
     config_path = options.get("config")
     config = load_config(config_path, workspace)
     installer = HarnessInstaller(
@@ -342,7 +352,6 @@ def dispatch(
 ) -> None:
     """Dispatch a ticket and print the assignment result."""
 
-    options = ctx.obj or {}
     # The command line is a reachable entry point for a worker shell, so it
     # resolves lineage from the same ledger as the MCP server instead of
     # trusting --call-depth or the (host-controlled) environment alone.
@@ -360,7 +369,7 @@ def dispatch(
             fallback_harnesses=list(fallback or []),
             timeout_seconds=timeout,
             workspace_mode=WorkspaceMode(workspace_mode),
-            workspace_root=options.get("workspace") or os.getcwd(),
+            workspace_root=str(runtime.router.workspace_root),
             context_files=list(context_file or []),
             auto_match_skills=auto_match_skills,
             call_depth=_effective_call_depth(call_depth, inherited_depth),
@@ -461,7 +470,7 @@ def init_mcp(
     """Emit or install the MCP server entry for a controller harness."""
 
     options = ctx.obj or {}
-    workspace = options.get("workspace") or os.getcwd()
+    workspace = options.get("workspace") or _workspace_from_cwd()
     config = {
         "mcpServers": {
             "harness-mesh": {

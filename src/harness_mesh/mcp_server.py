@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-from pathlib import Path
 from typing import Any
 
 try:  # MCP v1 (the pinned API)
@@ -19,6 +18,7 @@ from .lineage import (
     _inherited_lineage,
     _merge_trace_chain,
     _task_id_from_cwd,
+    _workspace_from_cwd,
 )
 from .models import (
     ContinuationCheckpoint,
@@ -48,15 +48,6 @@ TOOL_NAMES = [
 ]
 
 _runtime: MeshRuntime | None = None
-
-
-def _workspace_from_cwd() -> str:
-    cwd = Path.cwd().resolve()
-    parts = cwd.parts
-    for index, part in enumerate(parts):
-        if part == ".harness-mesh" and index + 1 < len(parts) and parts[index + 1] == "worktrees":
-            return str(Path(*parts[:index]))
-    return str(cwd)
 
 
 def get_runtime() -> MeshRuntime:
