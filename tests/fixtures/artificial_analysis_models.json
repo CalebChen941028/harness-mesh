@@ -1,0 +1,57 @@
+{
+  "tier": "free",
+  "intelligence_index_version": 5,
+  "pagination": {
+    "page": 1,
+    "page_size": 200,
+    "total_pages": 1,
+    "has_more": false
+  },
+  "data": [
+    {
+      "id": "cd684ea4-b475-4269-b001-d469d06d8a7a",
+      "name": "GLM-5.3 (Max)",
+      "slug": "glm-5-3",
+      "release_date": "2026-08-18",
+      "model_creator": {
+        "id": "67437eb6-7dc1-4e93-befd-22c8b8ec2065",
+        "name": "Z AI",
+        "country": "cn"
+      },
+      "reasoning_model": true,
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 31.7,
+        "artificial_analysis_coding_index": 38.2,
+        "artificial_analysis_agentic_index": 35.9,
+        "artificial_analysis_finance_and_accounting_index": 42.1,
+        "artificial_analysis_strategy_and_ops_index": 47.4,
+        "artificial_analysis_legal_index": 35.8,
+        "artificial_analysis_healthcare_and_medical_index": 39.3,
+        "artificial_analysis_engineering_index": 37.6,
+        "artificial_analysis_economics_index": 39.3
+      },
+      "artificial_analysis_intelligence_index_cost": {
+        "total_cost": 3495.62,
+        "cost_per_task": {
+          "total_cost": 5.0093,
+          "input_cost": 4.4857,
+          "reasoning_cost": 0.373,
+          "answer_cost": 0.1505
+        }
+      },
+      "pricing": {
+        "price_1m_input_tokens": 1.4,
+        "price_1m_output_tokens": 4.4,
+        "price_1m_cache_hit_tokens": 0.26,
+        "price_1m_cache_write_tokens": null
+      },
+      "performance": {
+        "median_output_tokens_per_second": 80.07,
+        "median_time_to_first_token_seconds": 2.22,
+        "median_time_to_first_answer_token_seconds": 27.19,
+        "median_end_to_end_response_time_seconds": 33.44
+      },
+      "openrouter_api_id": "z-ai/glm-5.3"
+    }
+  ]
+}

@@ -170,6 +170,37 @@ def resolve_harness_binary(
     return None
 
 
+class MarketOverrideConfig(BaseModel):
+    """One ``market.overrides`` entry: a glob and the values it replaces."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    intelligence: float | None = None
+    input_per_mtok: float | None = None
+    output_per_mtok: float | None = None
+    cache_read_per_mtok: float | None = None
+    context_window: int | None = None
+    reasoning: bool | None = None
+
+
+class MarketConfig(BaseModel):
+    """Settings for the read-only model market and its on-disk snapshot cache."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    enabled: bool = True
+    ttl_seconds: int = 21_600
+    sources: list[str] = Field(
+        default_factory=lambda: ["openrouter", "models_dev", "artificial_analysis"]
+    )
+    artificial_analysis_key_env: str = "ARTIFICIAL_ANALYSIS_API_KEY"
+    artificial_analysis_ttl_seconds: int = 43_200
+    artificial_analysis_daily_limit: int = 20
+    stale_after_days: int = 7
+    aliases: dict[str, str] = Field(default_factory=dict)
+    overrides: dict[str, MarketOverrideConfig] = Field(default_factory=dict)
+
+
 class MeshConfig(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
@@ -210,6 +241,7 @@ class MeshConfig(BaseModel):
     )
     skill_roots: list[str] = Field(default_factory=list)
     plugin_roots: list[str] = Field(default_factory=list)
+    market: MarketConfig = Field(default_factory=MarketConfig)
     harnesses: dict[str, HarnessConfig] = Field(default_factory=dict)
 
     def enabled_harnesses(self) -> list[str]:
