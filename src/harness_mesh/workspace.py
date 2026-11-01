@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -89,6 +90,7 @@ class WorkspaceManager:
         self.worktrees_root = self.state_dir / "worktrees"
         self.mcp_dir = self.state_dir / "mcp"
         self.tmp_dir = self.state_dir / "tmp"
+        self.git_guard_dir = self.state_dir / "git-guards"
         self.git_binary = git_binary
         self.env = dict(os.environ)
         if env:
@@ -109,7 +111,7 @@ class WorkspaceManager:
         timeout: int = 120,
         input_text: str | None = None,
     ) -> subprocess.CompletedProcess:
-        command = [self.git_binary, *args]
+        command = [self.git_binary, "-c", "core.hooksPath=/dev/null", *args]
         try:
             process = subprocess.run(
                 command,
@@ -130,6 +132,78 @@ class WorkspaceManager:
                 f"stdout: {process.stdout}\nstderr: {process.stderr}"
             )
         return process
+
+    def _git_common_dir(self) -> Path | None:
+        result = self._git(["rev-parse", "--git-common-dir"], cwd=self.workspace_root)
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        common = Path(result.stdout.strip())
+        if not common.is_absolute():
+            common = (self.workspace_root / common).resolve()
+        return common
+
+    @staticmethod
+    def _hash_file(path: Path) -> str | None:
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return None
+
+    def _git_metadata_snapshot(self) -> dict:
+        common = self._git_common_dir()
+        if common is None:
+            return {}
+        config = common / "config"
+        config_hash = self._hash_file(config) if config.exists() else None
+        hooks = common / "hooks"
+        hook_hashes: dict[str, str] = {}
+        if hooks.is_dir():
+            for entry in sorted(hooks.rglob("*")):
+                if entry.is_file() and not entry.is_symlink():
+                    digest = self._hash_file(entry)
+                    if digest is not None:
+                        hook_hashes[entry.relative_to(hooks).as_posix()] = digest
+        return {"config": config_hash, "hooks": hook_hashes}
+
+    def _git_guard_path(self, task_id: str) -> Path:
+        safe = _SAFE_TASK_ID.sub("_", task_id)
+        return self.git_guard_dir / f"{safe}.json"
+
+    def _record_git_guard(self, task_id: str) -> None:
+        try:
+            snapshot = self._git_metadata_snapshot()
+            self.git_guard_dir.mkdir(parents=True, exist_ok=True)
+            payload = {"task_id": task_id, "snapshot": snapshot}
+            self._git_guard_path(task_id).write_text(
+                json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+            )
+        except OSError as exc:
+            logger.warning("unable to record Git metadata guard for %s: %s", task_id, exc)
+
+    def _verify_git_guard(self, task_id: str) -> None:
+        guard_path = self._git_guard_path(task_id)
+        if not guard_path.exists():
+            logger.warning("no Git metadata guard recorded for %s; applying without comparison", task_id)
+            return
+        try:
+            saved = json.loads(guard_path.read_text(encoding="utf-8")).get("snapshot", {})
+        except (OSError, json.JSONDecodeError):
+            raise WorkspaceError(f"Git metadata guard for {task_id} is unreadable")
+        current = self._git_metadata_snapshot()
+        if saved == current:
+            return
+        changes: list[str] = []
+        if saved.get("config") != current.get("config"):
+            changes.append(".git/config changed")
+        old_hooks = saved.get("hooks") or {}
+        new_hooks = current.get("hooks") or {}
+        for name in sorted(set(old_hooks) | set(new_hooks)):
+            if old_hooks.get(name) != new_hooks.get(name):
+                action = "added" if name not in old_hooks else "removed" if name not in new_hooks else "modified"
+                changes.append(f".git/hooks/{name} {action}")
+        raise WorkspaceError(
+            f"Git metadata changed since task {task_id} started: {'; '.join(changes)}"
+        )
 
     def is_git_repo(self, path: Path | None = None) -> bool:
         target = path or self.workspace_root
@@ -291,6 +365,7 @@ class WorkspaceManager:
         sync_uncommitted: bool = True,
     ) -> WorktreeInfo:
         self.ensure_repository()
+        self._record_git_guard(task_id)
         path = self.worktree_path(task_id)
         branch = self.branch_name(task_id)
         if path.exists():
@@ -644,6 +719,7 @@ class WorkspaceManager:
             raise WorkspaceError(f"worktree does not exist for task {task_id}: {source}")
         if source.resolve() == target.resolve():
             return ApplyResult(task_id=task_id, strategy=strategy, detail="already in the primary workspace")
+        self._verify_git_guard(task_id)
         changes = self.collect_changes(source)
         if strategy == "copy":
             applied = self._copy_changes(source, target, changes.modified_files)
