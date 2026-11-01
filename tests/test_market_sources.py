@@ -32,6 +32,18 @@ MODELSDEV_PAYLOAD = json.loads((FIXTURES / "modelsdev_api.json").read_text(encod
 ARTIFICIAL_ANALYSIS_PAYLOAD = json.loads(
     (FIXTURES / "artificial_analysis_models.json").read_text(encoding="utf-8")
 )
+FIRST_PARTY_PROVIDERS = [
+    "anthropic",
+    "openai",
+    "google",
+    "deepseek",
+    "zai",
+    "zhipuai",
+    "alibaba",
+    "moonshotai",
+    "xai",
+    "mistral",
+]
 
 
 def _fixture_transport(requests: list[httpx.Request] | None = None) -> httpx.MockTransport:
@@ -145,8 +157,10 @@ async def test_missing_or_invalid_prices_are_unknown_not_zero():
 # ---------------------------------------------------------------------------
 
 
-def test_modelsdev_parsing_uses_per_million_costs_and_keeps_vendors_distinct():
-    models = parse_models_dev(MODELSDEV_PAYLOAD)
+def test_modelsdev_parsing_uses_per_million_costs_and_folds_same_model_names():
+    models = parse_models_dev(
+        MODELSDEV_PAYLOAD, first_party_providers=FIRST_PARTY_PROVIDERS
+    )
     by_key = {model.key: model for model in models}
 
     opus = by_key["anthropic/claude-opus-5-5"]
@@ -164,9 +178,9 @@ def test_modelsdev_parsing_uses_per_million_costs_and_keeps_vendors_distinct():
     assert flash.output_per_mtok == 0.5
     assert flash.reasoning is True
 
-    # The same model name under two providers stays two market entries.
-    assert "alibaba/kimi-k3" in by_key
+    # The same model name under two providers folds into one canonical entry.
     assert "moonshotai/kimi-k3" in by_key
+    assert "alibaba/kimi-k3" not in by_key
 
 
 def test_canonical_keys_treat_dots_hyphens_and_vendor_punctuation_equally():

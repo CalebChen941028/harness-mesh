@@ -51,3 +51,44 @@ async def test_live_artificial_analysis_when_a_key_is_configured():
     assert models
     assert any(model.intelligence is not None for model in models)
     assert any(model.intelligence_source == "artificial_analysis" for model in models)
+
+
+@pytest.mark.asyncio
+async def test_live_modelsdev_folding_keeps_one_entry_per_model():
+    from harness_mesh.market import normalize_model_identity
+
+    provider = ModelsDevProvider(
+        first_party_providers=[
+            "anthropic",
+            "openai",
+            "google",
+            "deepseek",
+            "zai",
+            "zhipuai",
+            "alibaba",
+            "moonshotai",
+            "xai",
+            "mistral",
+        ]
+    )
+    models = await provider.fetch()
+    by_key = {model.key: model for model in models}
+
+    assert len(by_key) < 2_000
+
+    for name in (
+        "claude-opus-5-5",
+        "gemini-4-argon",
+        "glm-5.3",
+        "glm-5.3-flash",
+        "deepseek-v4.1-flash",
+    ):
+        identity = normalize_model_identity(name)[0]
+        matches = [
+            model
+            for model in models
+            if normalize_model_identity(model.key.split("/", 1)[-1])[0] == identity
+        ]
+        assert len(matches) == 1, (name, [model.key for model in matches])
+        assert matches[0].input_per_mtok is not None
+        assert matches[0].output_per_mtok is not None

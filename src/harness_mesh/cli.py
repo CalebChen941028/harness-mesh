@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import fnmatch
 import json
 import os
 import sys
@@ -21,7 +20,7 @@ from .lineage import (
     _resolved_lineage,
     _workspace_from_cwd,
 )
-from .market import list_unmatched
+from .market import filter_market_models, list_unmatched
 from .models import (
     QuotaExhaustedPolicy,
     RoutingMode,
@@ -704,19 +703,15 @@ def market_show(
     """Show the cached market catalogue and optional unmatched harness models."""
 
     runtime = _runtime(ctx)
+    ledger_hint: str | None = None
+    catalog_empty = True
     try:
         catalog = runtime.router.market.catalog()
-        rows = list(catalog.models)
-        if model:
-            pattern = model.lower()
-            rows = [
-                item
-                for item in rows
-                if fnmatch.fnmatchcase(item.key.lower(), pattern)
-                or fnmatch.fnmatchcase(item.name.lower(), pattern)
-            ]
+        catalog_empty = not catalog.models
+        rows = filter_market_models(catalog.models, model)
         payload: dict[str, Any] = {
             "models": [item.model_dump(mode="json") for item in rows],
+            "matched": len(rows),
             "sources": list(catalog.sources),
             "fetched_at": catalog.fetched_at,
             "stale": catalog.stale,
@@ -724,22 +719,32 @@ def market_show(
             "warnings": list(catalog.warnings),
         }
         if unmatched:
-            inventory: dict[str, list[str]] = {}
-            for found in runtime.storage.list_discovered_models():
-                inventory.setdefault(found.harness, []).append(found.model_id)
-            payload["unmatched"] = list_unmatched(
-                inventory,
-                catalog.models,
-                aliases=runtime.config.market.aliases,
-            )
+            ledger = runtime.storage.list_discovered_models()
+            if not ledger:
+                payload["unmatched"] = []
+                ledger_hint = (
+                    "No harness models are in the discovery ledger yet; "
+                    "run `hmesh models --refresh` first."
+                )
+            else:
+                inventory: dict[str, list[str]] = {}
+                for found in ledger:
+                    inventory.setdefault(found.harness, []).append(found.model_id)
+                payload["unmatched"] = list_unmatched(
+                    inventory,
+                    catalog.models,
+                    aliases=runtime.config.market.aliases,
+                )
     finally:
         runtime.storage.close()
 
     if json_output:
         typer.echo(_json(payload))
         return
-    if not rows:
+    if catalog_empty:
         typer.echo("No market data is cached. Run `hmesh market refresh`.")
+    elif model and not rows:
+        typer.echo(f"no model matches {model}")
     for item in rows:
         typer.echo(
             f"{item.key:48} in={_price(item.input_per_mtok):>8} "
@@ -751,13 +756,15 @@ def market_show(
         typer.echo("cache is stale; refresh it when the network is available")
     if unmatched:
         entries = payload["unmatched"]
-        if not entries:
+        if ledger_hint:
+            typer.echo(ledger_hint)
+        elif not entries:
             typer.echo("No unmatched harness models.")
         for entry in entries:
             effort = f" effort={entry['effort_variant']}" if entry["effort_variant"] else ""
             typer.echo(
                 f"unmatched {entry['harness']:14} {entry['model_id']}{effort} "
-                "-> add market.aliases"
+                f"confidence={entry.get('confidence', 'none')} -> add market.aliases"
             )
 
 

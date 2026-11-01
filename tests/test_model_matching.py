@@ -21,11 +21,28 @@ from harness_mesh.market import (
 FIXTURES = Path(__file__).parent / "fixtures"
 OPENROUTER_PAYLOAD = json.loads((FIXTURES / "openrouter_models.json").read_text(encoding="utf-8"))
 MODELSDEV_PAYLOAD = json.loads((FIXTURES / "modelsdev_api.json").read_text(encoding="utf-8"))
+FIRST_PARTY_PROVIDERS = [
+    "anthropic",
+    "openai",
+    "google",
+    "deepseek",
+    "zai",
+    "zhipuai",
+    "alibaba",
+    "moonshotai",
+    "xai",
+    "mistral",
+]
 
 
 def catalog() -> list[MarketModel]:
     return merge_market_models(
-        [*parse_openrouter(OPENROUTER_PAYLOAD), *parse_models_dev(MODELSDEV_PAYLOAD)]
+        [
+            *parse_openrouter(OPENROUTER_PAYLOAD),
+            *parse_models_dev(
+                MODELSDEV_PAYLOAD, first_party_providers=FIRST_PARTY_PROVIDERS
+            ),
+        ]
     )
 
 
@@ -107,9 +124,18 @@ def test_deepseek_flash_does_not_cross_into_other_families(models):
     assert match_model("deepseek-v4.1-flash-1017", models).key == "deepseek/deepseek-v4-1-flash-1017"
 
 
-def test_ambiguous_names_resolve_to_none(models):
-    # ``kimi-k3`` exists under two vendors with identical model names.
-    result = match_model("kimi-k3", models)
+def test_same_name_from_two_providers_folds_to_one_entry(models):
+    # models.dev lists ``kimi-k3`` under both alibaba and moonshotai, and the
+    # canonical id folds them into one entry instead of two ambiguous ones.
+    matches = [model for model in models if model.key.endswith("/kimi-k3")]
+    assert len(matches) == 1
+    assert match_model("kimi-k3", models).key == matches[0].key
+
+
+def test_ambiguous_names_resolve_to_none():
+    first = MarketModel(key="alpha/shared", name="shared", aliases=["shared"], sources=["openrouter"])
+    second = MarketModel(key="beta/shared", name="shared", aliases=["shared"], sources=["openrouter"])
+    result = match_model("shared", [first, second])
     assert result.key is None
     assert result.confidence == "none"
 

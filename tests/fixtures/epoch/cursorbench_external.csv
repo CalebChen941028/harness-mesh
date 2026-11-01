@@ -1,0 +1,32 @@
+Model version,Score,Reasoning level,Release date,Organization
+gemini-3.8-flash_high,0.396,High,2026-09-02,Google DeepMind
+gemini-3.8-flash_medium,0.373,Medium,2026-09-02,Google DeepMind
+claude-opus-5-5_max,0.578,Max,2026-09-22,Anthropic
+claude-opus-5-5_xhigh,0.56,Extra High,2026-09-22,Anthropic
+claude-sonnet-5-5_max,0.555,Max,2026-09-28,Anthropic
+claude-sonnet-5-5_xhigh,0.531,Extra High,2026-09-28,Anthropic
+claude-sonnet-5-5_high,0.478,High,2026-09-28,Anthropic
+claude-sonnet-5-5_medium,0.392,Medium,2026-09-28,Anthropic
+claude-sonnet-5-5_low,0.358,Low,2026-09-28,Anthropic
+claude-opus-5-5_high,0.56,High,2026-09-22,Anthropic
+claude-opus-5-5_medium,0.525,Medium,2026-09-22,Anthropic
+claude-opus-5-5_low,0.43700000000000006,Low,2026-09-22,Anthropic
+glm-5.3_max,0.42600000000000005,Max,2026-08-14,Z.ai (Zhipu AI)
+glm-5.3_high,0.38,High,2026-08-14,Z.ai (Zhipu AI)
+glm-5.3-flash_max,0.368,Max,2026-08-20,Z.ai (Zhipu AI)
+glm-5.3_low,0.33299999999999996,Low,2026-08-14,Z.ai (Zhipu AI)
+glm-5.3-flash_high,0.311,High,2026-08-20,Z.ai (Zhipu AI)
+glm-5.3-flash_low,0.269,Low,2026-08-20,Z.ai (Zhipu AI)
+gemini-4-argon_high,0.529,High,2026-09-30,Google DeepMind
+gemini-4-argon_medium,0.528,Medium,2026-09-30,Google DeepMind
+gemini-4-argon_low,0.506,Low,2026-09-30,Google DeepMind
+gemini-4-argon_minimal,0.488,,2026-09-30,Google DeepMind
+claude-haiku-5-5_max,0.484,Max,2026-10-07,Anthropic
+claude-haiku-5-5_xhigh,0.443,Extra High,2026-10-07,Anthropic
+claude-haiku-5-5_high,0.423,High,2026-10-07,Anthropic
+claude-haiku-5-5_medium,0.369,Medium,2026-10-07,Anthropic
+claude-haiku-5-5_low,0.309,Low,2026-10-07,Anthropic
+deepseek-v4.1-flash-1017_max,0.47700000000000004,Max,2026-10-17,DeepSeek
+deepseek-v4.1-flash-1017_medium,0.46299999999999997,Medium,2026-10-17,DeepSeek
+deepseek-v4.1-flash-1017_high,0.456,High,2026-10-17,DeepSeek
+deepseek-v4.1-flash-1017_low,0.449,Low,2026-10-17,DeepSeek

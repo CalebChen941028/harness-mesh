@@ -1,0 +1,33 @@
+Model version,Arena Score,Release date,Organization
+claude-opus-5-5_max,1820.31,2026-09-22,Anthropic
+gpt-6-astra_max,1800.28,2026-09-03,OpenAI
+claude-sonnet-5-5_xhigh,1786.26,2026-09-28,Anthropic
+gpt-6.1-sol_max,1758.72,2026-09-29,OpenAI
+claude-sonnet-5-5_high,1698.82,2026-09-28,Anthropic
+gpt-6-sol_max,1689.33,2026-09-22,OpenAI
+gemini-4-argon_high,1679.5,2026-09-30,Google DeepMind
+qwen3.8-max_unknown,1670.58,2026-08-02,Alibaba
+glm-5.3_max,1614.45,2026-08-14,Z.ai (Zhipu AI)
+deepseek-v4.1-flash_max,1613.95,2026-09-09,DeepSeek
+glm-5.2_max,1593.25,2026-06-16,Z.ai (Zhipu AI)
+gpt-6-luna_max,1581.95,2026-09-22,OpenAI
+deepseek-v4-pro-0813_high,1580.53,2026-08-13,DeepSeek
+gemini-3.8-flash_high,1567.88,2026-09-02,Google DeepMind
+claude-opus-4-7_unknown,1566.85,2026-04-16,Anthropic
+claude-opus-4-7,1557.37,2026-04-16,Anthropic
+claude-opus-4-6_unknown,1556.29,2026-02-05,Anthropic
+claude-opus-4-7_high,1555.22,2026-04-16,Anthropic
+claude-opus-4-6_high,1546.62,2026-02-05,Anthropic
+claude-opus-4-6,1537.13,2026-02-05,Anthropic
+claude-sonnet-4-6,1520.99,2026-02-17,Anthropic
+gpt-5.5_xhigh,1510.15,2026-04-23,OpenAI
+gemini-3.5-flash_unknown,1506.38,2026-05-19,Google DeepMind
+gemini-3.5-flash_high,1500.04,2026-05-19,Google DeepMind
+gemini-3.5-flash_medium,1491.55,2026-05-19,Google DeepMind
+gpt-5.5_high,1486.98,2026-04-23,OpenAI
+deepseek-v4-pro_unknown,1463.63,2026-04-24,DeepSeek
+deepseek-v4-pro_high,1463.61,2026-04-24,DeepSeek
+gpt-5.5_unknown,1457.76,2026-04-23,OpenAI
+gemini-3.5-flash-lite,1446.62,2026-07-21,Google DeepMind
+deepseek-v4-pro_none,1445.72,2026-04-24,DeepSeek
+glm-5,1435.91,2026-02-11,Z.ai (Zhipu AI)

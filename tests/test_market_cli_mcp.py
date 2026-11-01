@@ -185,7 +185,12 @@ def test_market_show_unmatched_lists_only_real_models(tmp_path, monkeypatch):
         assert result.exit_code == 0, output
         payload = json.loads(output)
         assert payload["unmatched"] == [
-            {"harness": "claude_code", "model_id": "claude-fable-5-1", "effort_variant": ""}
+            {
+                "harness": "claude_code",
+                "model_id": "claude-fable-5-1",
+                "effort_variant": "",
+                "confidence": "none",
+            }
         ]
         text = _plain(_invoke(monkeypatch, factory, "market", "show", "--unmatched").output)
         assert "claude-fable-5-1" in text

@@ -1,0 +1,30 @@
+Model version,Performance,Release date,Organization
+gpt-6-astra_max,2951.32,2026-09-03,OpenAI
+gpt-6.1-sol_max,2743.75,2026-09-29,OpenAI
+gpt-6.1-terra_max,2608.82,2026-10-26,OpenAI
+gpt-6-sol_max,2462.0,2026-09-22,OpenAI
+claude-opus-5-5_high,2147.38,2026-09-22,Anthropic
+gemini-4-argon_high,2100.1,2026-09-30,Google DeepMind
+gpt-5.5_xhigh,1942.97,2026-04-23,OpenAI
+claude-sonnet-5-5_high,1819.12,2026-09-28,Anthropic
+gemini-4-argon_low,1705.4,2026-09-30,Google DeepMind
+deepseek-v4.1-flash-1017_max,1622.0,2026-10-17,DeepSeek
+gpt-5.5_medium,1589.38,2026-04-23,OpenAI
+claude-haiku-5-5_high,1587.0,2026-10-07,Anthropic
+gpt-6-luna_xhigh,1576.92,2026-09-22,OpenAI
+deepseek-v4-pro-0813_max,1403.15,2026-08-13,DeepSeek
+claude-sonnet-4-6_medium,1327.3,2026-02-17,Anthropic
+claude-opus-4-7,1323.05,2026-04-16,Anthropic
+glm-5.3_high,1317.4,2026-08-14,Z.ai (Zhipu AI)
+gemini-3.8-flash_high,1269.72,2026-09-02,Google DeepMind
+gpt-5.5_none,1127.58,2026-04-23,OpenAI
+deepseek-v4.1-flash_max,1092.35,2026-09-09,DeepSeek
+glm-5.2_high,1046.95,2026-06-16,Z.ai (Zhipu AI)
+glm-5.2_max,1010.17,2026-06-16,Z.ai (Zhipu AI)
+deepseek-v4-pro_high,1006.08,2026-04-24,DeepSeek
+claude-opus-4-6,996.5,2026-02-05,Anthropic
+gemini-3.5-flash_high,911.02,2026-05-19,Google DeepMind
+glm-5,765.62,2026-02-11,Z.ai (Zhipu AI)
+gemini-3.5-flash-lite_high,765.27,2026-07-21,Google DeepMind
+deepseek-v4-pro_none,521.67,2026-04-24,DeepSeek
+glm-5.3-flash_high,303.55,2026-08-20,Z.ai (Zhipu AI)

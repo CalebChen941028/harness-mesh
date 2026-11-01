@@ -1,0 +1,20 @@
+Model version,Main score,Harness,Reasoning effort,Release date,Organization
+claude-opus-5-5_medium,0.5464,claude-code,medium,2026-09-22,Anthropic
+gpt-6-astra_max,0.5326,codex,max,2026-09-03,OpenAI
+claude-sonnet-5-5_xhigh,0.5209,claude-code,xhigh,2026-09-28,Anthropic
+gpt-6.1-sol_medium,0.5023,codex,medium,2026-09-29,OpenAI
+gpt-6-sol_max,0.4927,codex,max,2026-09-22,OpenAI
+gemini-4-argon_medium,0.4755,devin-cli,medium,2026-09-30,Google DeepMind
+claude-haiku-5-5_max,0.4636,claude-code,max,2026-10-07,Anthropic
+deepseek-v4.1-flash_high,0.4387,devin-cli,high,2026-09-09,DeepSeek
+gpt-5.5_unknown,0.42960000000000004,codex,xhigh,2026-04-23,OpenAI
+gpt-6-luna_max,0.4242,codex,max,2026-09-22,OpenAI
+gemini-3.8-flash_medium,0.4119,devin-cli,medium,2026-09-02,Google DeepMind
+glm-5.3_max,0.40140000000000003,devin-cli,max,2026-08-14,Z.ai (Zhipu AI)
+claude-opus-4-7_unknown,0.3854,claude-code,max,2026-04-16,Anthropic
+glm-5.3-flash_max,0.3183,devin-cli,max,2026-08-20,Z.ai (Zhipu AI)
+deepseek-v4-pro-0813_high,0.2855,devin-cli,high,2026-08-13,DeepSeek
+claude-opus-4-6_unknown,0.2664,claude-code,high,2026-02-05,Anthropic
+glm-5.2_none,0.245,mini-swe-agent,none,2026-06-16,Z.ai (Zhipu AI)
+claude-sonnet-4-6_unknown,0.24310000000000004,claude-code,max,2026-02-17,Anthropic
+deepseek-v4-pro_none,0.1764,mini-swe-agent,none,2026-04-24,DeepSeek

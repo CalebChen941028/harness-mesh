@@ -1,0 +1,8 @@
+Model version,Accuracy,Release date,Organization
+gpt-6-astra_unknown,0.5479999999999999,2026-09-03,OpenAI
+claude-sonnet-5-5_xhigh,0.4612,2026-09-28,Anthropic
+gemini-3.8-flash_unknown,0.44520000000000004,2026-09-02,Google DeepMind
+claude-opus-4-7_unknown,0.36200000000000004,2026-04-16,Anthropic
+claude-opus-4-6_max,0.3444,2026-02-05,Anthropic
+claude-haiku-5-5_unknown,0.3012,2026-10-07,Anthropic
+claude-opus-4-6,0.19,2026-02-05,Anthropic

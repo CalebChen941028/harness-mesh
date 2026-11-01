@@ -193,6 +193,10 @@ class MarketConfig(BaseModel):
     sources: list[str] = Field(
         default_factory=lambda: ["openrouter", "models_dev", "artificial_analysis"]
     )
+    # Vendors whose own catalogue entry is the authoritative list price.
+    # The default is empty so the list lives in the shipped example config;
+    # without it models.dev prices fall back to the median of every offer.
+    first_party_providers: list[str] = Field(default_factory=list)
     artificial_analysis_key_env: str = "ARTIFICIAL_ANALYSIS_API_KEY"
     artificial_analysis_ttl_seconds: int = 43_200
     artificial_analysis_daily_limit: int = 20

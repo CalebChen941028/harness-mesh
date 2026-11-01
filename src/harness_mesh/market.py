@@ -20,6 +20,7 @@ import logging
 import math
 import os
 import re
+import statistics
 import time
 from datetime import date, datetime, timezone
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -83,6 +84,10 @@ class MarketModel(BaseModel):
     intelligence: float | None = None
     intelligence_source: str | None = None
     speed_tps: float | None = None
+    # Where ``input_per_mtok``/``output_per_mtok`` came from.  ``first_party``
+    # means a model vendor's own catalogue entry, ``median`` the fallback over
+    # every reseller offer, ``openrouter`` the OpenRouter listing.
+    price_source: str | None = None
     sources: list[str] = Field(default_factory=list)
     aliases: list[str] = Field(default_factory=list)
     fetched_at: float = Field(default_factory=time.time)
@@ -168,6 +173,24 @@ def _price_per_mtok(value: Any, *, per_token: bool) -> float | None:
     return round(number * 1_000_000, 9) if per_token else number
 
 
+def _is_placeholder_price(input_price: float | None, output_price: float | None) -> bool:
+    """True when a catalogue entry declares ``0`` for both directions.
+
+    models.dev and OpenRouter both contain subscription or "plan" rows that
+    price every token at zero.  Those rows say nothing about the list price, so
+    they must never be read as a free model.
+    """
+
+    return input_price == 0 and output_price == 0
+
+
+def _median(values: Iterable[float]) -> float | None:
+    numbers = [value for value in values if value is not None]
+    if not numbers:
+        return None
+    return float(statistics.median(numbers))
+
+
 def _bool(value: Any) -> bool:
     return value is True
 
@@ -188,8 +211,16 @@ def _iso_date(value: Any) -> str | None:
     return None
 
 
+# Vendors publish the same company under different identifiers (``zhipuai``
+# in models.dev's canonical ids, ``z-ai`` on OpenRouter).  Folding them onto a
+# single slug is what lets the two catalogues merge; these are provider
+# identities, never model names.
+_VENDOR_ALIASES = {"zhipuai": "zai"}
+
+
 def _vendor_slug(vendor: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", vendor.lower())
+    slug = re.sub(r"[^a-z0-9]+", "", vendor.lower())
+    return _VENDOR_ALIASES.get(slug, slug)
 
 
 def _normalize_name(name: str) -> str:
@@ -345,12 +376,20 @@ class OpenRouterProvider(MarketProvider):
 class ModelsDevProvider(MarketProvider):
     name = "models_dev"
 
-    def __init__(self, *, transport: httpx.AsyncBaseTransport | None = None):
+    def __init__(
+        self,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+        first_party_providers: Sequence[str] = (),
+    ):
         self.transport = transport
+        self.first_party_providers = tuple(first_party_providers)
 
     async def fetch(self) -> list[MarketModel]:
         payload = await fetch_json(MODELSDEV_URL, transport=self.transport)
-        return parse_models_dev(payload)
+        return parse_models_dev(
+            payload, first_party_providers=self.first_party_providers
+        )
 
 
 class ArtificialAnalysisProvider(MarketProvider):
@@ -450,42 +489,193 @@ def parse_openrouter(payload: Any, *, fetched_at: float | None = None) -> list[M
     return models
 
 
-def parse_models_dev(payload: Any, *, fetched_at: float | None = None) -> list[MarketModel]:
+def parse_models_dev(
+    payload: Any,
+    *,
+    fetched_at: float | None = None,
+    first_party_providers: Sequence[str] = (),
+) -> list[MarketModel]:
+    """Fold models.dev's provider-oriented catalogue into canonical models.
+
+    models.dev lists the same model once per provider (original vendors, hosted
+    platforms and several hundred resale gateways).  The canonical model is
+    identified by ``canonical_model_id`` when present and by the model name
+    otherwise.  Prices follow the documented precedence: a first-party vendor's
+    own entry, then the median of the priced offers.  OpenRouter's price is
+    applied later by :func:`merge_market_models` when no first-party entry
+    exists.
+    """
+
     if not isinstance(payload, dict):
         raise MarketError("models.dev payload must be an object keyed by provider")
     now = time.time() if fetched_at is None else fetched_at
-    models: list[MarketModel] = []
+    first_party = [
+        str(item).strip().lower() for item in first_party_providers if str(item).strip()
+    ]
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
     for provider_id, provider in payload.items():
         if not isinstance(provider, dict):
             continue
         provider_models = provider.get("models")
         if not isinstance(provider_models, dict):
             continue
-        vendor = _text(provider_id, 80) or _text(provider.get("id"), 80) or "unknown"
+        provider_name = (
+            _text(provider_id, 80) or _text(provider.get("id"), 80) or "unknown"
+        ).lower()
         for model_id, entry in provider_models.items():
             if not isinstance(entry, dict):
                 continue
-            name = _text(entry.get("name"), 200) or _text(model_id, 200)
-            key = canonical_model_key(vendor, _text(model_id, 200) or name)
+            raw_id = _text(model_id, 200)
+            if not raw_id:
+                continue
+            name = _text(entry.get("name"), 200) or raw_id
+            canonical_id = _text(entry.get("canonical_model_id"), 300)
+            canonical_vendor = ""
+            canonical_name = ""
+            if canonical_id:
+                vendor_part, separator, name_part = canonical_id.partition("/")
+                if separator and name_part:
+                    canonical_vendor = _vendor_slug(vendor_part)
+                    canonical_name = name_part
+                else:
+                    canonical_name = canonical_id
+            if not canonical_name:
+                canonical_name = raw_id.split("/")[-1] or name
+            group_id = canonical_model_key(canonical_vendor, canonical_name)
             cost = entry.get("cost") if isinstance(entry.get("cost"), dict) else {}
             limit = entry.get("limit") if isinstance(entry.get("limit"), dict) else {}
-            models.append(
-                MarketModel(
-                    key=key,
-                    vendor=vendor,
-                    name=name,
-                    input_per_mtok=_finite_number(cost.get("input")),
-                    output_per_mtok=_finite_number(cost.get("output")),
-                    cache_read_per_mtok=_finite_number(cost.get("cache_read")),
-                    context_window=_positive_int(limit.get("context")),
-                    reasoning=_bool(entry.get("reasoning")),
-                    tool_call=_bool(entry.get("tool_call")),
-                    release_date=_iso_date(entry.get("release_date")),
-                    sources=["models.dev"],
-                    aliases=_add_unique([], [_text(model_id, 200)]),
-                    fetched_at=now,
-                )
+            input_price = _finite_number(cost.get("input"))
+            output_price = _finite_number(cost.get("output"))
+            if _is_placeholder_price(input_price, output_price):
+                input_price = None
+                output_price = None
+            groups.setdefault(group_id, []).append(
+                {
+                    "provider": provider_name,
+                    "raw_id": raw_id,
+                    "name": name,
+                    "canonical_id": canonical_id,
+                    "canonical_vendor": canonical_vendor,
+                    "canonical_name": canonical_name,
+                    "input": input_price,
+                    "output": output_price,
+                    "cache_read": _finite_number(cost.get("cache_read")),
+                    "context_window": _positive_int(limit.get("context")),
+                    "reasoning": _bool(entry.get("reasoning")),
+                    "tool_call": _bool(entry.get("tool_call")),
+                    "release_date": _iso_date(entry.get("release_date")),
+                }
             )
+            if group_id not in order:
+                order.append(group_id)
+
+    models: list[MarketModel] = []
+    for group_id in order:
+        records = groups[group_id]
+        providers = {record["provider"] for record in records}
+        canonical_vendor = next(
+            (record["canonical_vendor"] for record in records if record["canonical_vendor"]),
+            "",
+        )
+        canonical_name = next(
+            (record["canonical_name"] for record in records if record["canonical_name"]),
+            records[0]["name"],
+        )
+        first_party_vendor = next(
+            (provider for provider in first_party if provider in providers), ""
+        )
+        vendor = (
+            canonical_vendor
+            or _vendor_slug(first_party_vendor)
+            or records[0]["provider"]
+        )
+        key = canonical_model_key(vendor, canonical_name)
+
+        first_party_record: dict[str, Any] | None = None
+        for provider in first_party:
+            matches = [
+                record
+                for record in records
+                if record["provider"] == provider
+                and not (record["input"] is None and record["output"] is None)
+            ]
+            if matches:
+                first_party_record = max(
+                    matches,
+                    key=lambda record: (record["input"] is not None)
+                    + (record["output"] is not None),
+                )
+                break
+
+        priced = [
+            record
+            for record in records
+            if not (record["input"] is None and record["output"] is None)
+        ]
+        if first_party_record is not None:
+            price_source = "first_party"
+            input_price = first_party_record["input"]
+            output_price = first_party_record["output"]
+            cache_read = first_party_record["cache_read"]
+        elif priced:
+            price_source = "median"
+            input_price = _median(record["input"] for record in priced)
+            output_price = _median(record["output"] for record in priced)
+            cache_read = _median(record["cache_read"] for record in priced)
+        else:
+            price_source = None
+            input_price = output_price = cache_read = None
+
+        representative = first_party_record or next(
+            (record for record in records if record["provider"] == vendor), records[0]
+        )
+        context_window = next(
+            (
+                record["context_window"]
+                for record in [representative, *records]
+                if record["context_window"] is not None
+            ),
+            None,
+        )
+        release_date = next(
+            (
+                record["release_date"]
+                for record in [representative, *records]
+                if record["release_date"] is not None
+            ),
+            None,
+        )
+        aliases: list[str] = []
+        canonical_identity = _normalize_name(canonical_name)
+        for record in records:
+            raw_identity = _normalize_name(record["raw_id"].split("/")[-1])
+            # Only ids that differ from the canonical name by punctuation or a
+            # vendor prefix are safe aliases.  A reseller's marketing name for
+            # a different model must not shadow another catalogue entry.
+            if raw_identity == canonical_identity:
+                _add_unique(aliases, [record["raw_id"]])
+            _add_unique(aliases, [record["canonical_id"]])
+        _add_unique(aliases, [canonical_name])
+        models.append(
+            MarketModel(
+                key=key,
+                vendor=vendor,
+                name=representative["name"],
+                input_per_mtok=input_price,
+                output_per_mtok=output_price,
+                cache_read_per_mtok=cache_read,
+                context_window=context_window,
+                reasoning=any(record["reasoning"] for record in records),
+                tool_call=any(record["tool_call"] for record in records),
+                release_date=release_date,
+                price_source=price_source,
+                sources=["models.dev"],
+                aliases=aliases[:40],
+                fetched_at=now,
+            )
+        )
     return models
 
 
@@ -571,14 +761,19 @@ def _positive_int(value: Any) -> int | None:
 def merge_market_models(models: Sequence[MarketModel]) -> list[MarketModel]:
     """Merge entries with the same canonical key.
 
-    Prices are taken from OpenRouter first and models.dev second.  Evaluation
-    scores only ever come from Artificial Analysis or a user override; this
-    function carries them through and never invents a score.
+    Metadata follows source priority (OpenRouter, models.dev, Artificial
+    Analysis).  Prices follow the documented precedence instead: a first-party
+    models.dev entry wins, then the OpenRouter listing, then the median offer
+    that :func:`parse_models_dev` already computed.  Evaluation scores only
+    ever come from Artificial Analysis or a user override; this function
+    carries them through and never invents a score.
     """
 
     merged: dict[str, MarketModel] = {}
+    groups: dict[str, list[MarketModel]] = {}
     order: list[str] = []
     for incoming in models:
+        groups.setdefault(incoming.key, []).append(incoming)
         if incoming.key not in merged:
             merged[incoming.key] = incoming.model_copy(deep=True)
             order.append(incoming.key)
@@ -593,20 +788,8 @@ def merge_market_models(models: Sequence[MarketModel]) -> list[MarketModel]:
                 current.vendor = incoming.vendor
             if incoming.release_date:
                 current.release_date = incoming.release_date
-        for field in (
-            "input_per_mtok",
-            "output_per_mtok",
-            "cache_read_per_mtok",
-            "context_window",
-        ):
-            if getattr(current, field) is None and getattr(incoming, field) is not None:
-                setattr(current, field, getattr(incoming, field))
-            elif (
-                getattr(incoming, field) is not None
-                and incoming_priority < current_priority
-                and field in {"input_per_mtok", "output_per_mtok", "cache_read_per_mtok"}
-            ):
-                setattr(current, field, getattr(incoming, field))
+        if current.context_window is None and incoming.context_window is not None:
+            current.context_window = incoming.context_window
         current.reasoning = current.reasoning or incoming.reasoning
         current.tool_call = current.tool_call or incoming.tool_call
         if incoming.intelligence is not None and incoming.intelligence_source in {
@@ -625,12 +808,62 @@ def merge_market_models(models: Sequence[MarketModel]) -> list[MarketModel]:
         _add_unique(current.sources, incoming.sources)
         _add_unique(current.aliases, incoming.aliases)
         current.fetched_at = max(current.fetched_at, incoming.fetched_at)
+
     for key in order:
         model = merged[key]
+        _resolve_prices(model, groups.get(key, []))
         model.sources = _sources_for(model)
         if model.intelligence_source not in _INTELLIGENCE_SOURCES:
             model.intelligence_source = None
     return [merged[key] for key in order]
+
+
+_PAID_FIELDS = ("input_per_mtok", "output_per_mtok", "cache_read_per_mtok")
+
+
+def _has_price(model: MarketModel) -> bool:
+    return any(getattr(model, field) is not None for field in _PAID_FIELDS)
+
+
+def _resolve_prices(model: MarketModel, group: Sequence[MarketModel]) -> None:
+    """Pick each price field from the highest-priority priced entry."""
+
+    first_party = next(
+        (
+            entry
+            for entry in group
+            if entry.price_source == "first_party" and _has_price(entry)
+        ),
+        None,
+    )
+    openrouter = next(
+        (
+            entry
+            for entry in group
+            if _has_price(entry) and "openrouter" in _sources_for(entry)
+        ),
+        None,
+    )
+    ordered = [entry for entry in (first_party, openrouter) if entry is not None]
+    ordered.extend(
+        entry
+        for entry in group
+        if entry not in ordered and _has_price(entry)
+    )
+    for field in _PAID_FIELDS:
+        for entry in ordered:
+            value = getattr(entry, field)
+            if value is not None:
+                setattr(model, field, value)
+                break
+    if first_party is not None:
+        model.price_source = "first_party"
+    elif openrouter is not None:
+        model.price_source = "openrouter"
+    elif ordered:
+        model.price_source = ordered[0].price_source
+    else:
+        model.price_source = None
 
 
 def apply_overrides(
@@ -956,9 +1189,46 @@ def list_unmatched(
                         "harness": harness,
                         "model_id": model_id,
                         "effort_variant": effort or "",
+                        "confidence": "none",
                     }
                 )
     return unmatched
+
+
+def filter_market_models(
+    models: Sequence[MarketModel], query: str | None
+) -> list[MarketModel]:
+    """Filter the catalogue the way ``hmesh market show --model`` does.
+
+    Dots and hyphens are interchangeable, matching is case-insensitive, and
+    ``*?[`` glob syntax is supported against the canonical key, the bare model
+    name and the display name.
+    """
+
+    text = _text(query, 300).lower()
+    if not text:
+        return list(models)
+    pattern = _normalize_name(text) or text
+    has_glob = any(character in text for character in "*?[")
+    matched: list[MarketModel] = []
+    for model in models:
+        raw_targets = [
+            model.key.lower(),
+            model.name.lower(),
+            model.key.split("/", 1)[-1].lower(),
+        ]
+        normalized_targets = [_normalize_name(target) for target in raw_targets]
+        if has_glob:
+            found = any(
+                fnmatch.fnmatchcase(target, text) for target in raw_targets
+            ) or any(fnmatch.fnmatchcase(target, pattern) for target in normalized_targets)
+        else:
+            found = any(text in target for target in raw_targets) or any(
+                pattern in target for target in normalized_targets
+            )
+        if found:
+            matched.append(model)
+    return matched
 
 
 # ---------------------------------------------------------------------------
@@ -1005,7 +1275,10 @@ class MarketService:
         else:
             self.providers = {
                 "openrouter": OpenRouterProvider(transport=transport),
-                "models_dev": ModelsDevProvider(transport=transport),
+                "models_dev": ModelsDevProvider(
+                    transport=transport,
+                    first_party_providers=self.config.first_party_providers,
+                ),
                 "artificial_analysis": ArtificialAnalysisProvider(
                     env=self.env,
                     key_env=self.config.artificial_analysis_key_env,
@@ -1337,6 +1610,7 @@ __all__ = [
     "blended_price",
     "canonical_model_key",
     "fetch_json",
+    "filter_market_models",
     "is_non_model_id",
     "list_unmatched",
     "match_model",

@@ -66,6 +66,21 @@ market:
     - openrouter
     - models_dev
     - artificial_analysis
+  # models.dev lists the same model once per provider, including hundreds of
+  # resale gateways with different prices. Entries fold onto one canonical
+  # model per name; the vendor's own entry below sets the list price, then
+  # OpenRouter, then the median of every priced offer.
+  first_party_providers:
+    - anthropic
+    - openai
+    - google
+    - deepseek
+    - zai
+    - zhipuai
+    - alibaba
+    - moonshotai
+    - xai
+    - mistral
   artificial_analysis_key_env: ARTIFICIAL_ANALYSIS_API_KEY
   # Map a harness model id (or glob) to a market key shown by
   # `hmesh market show --unmatched`.
