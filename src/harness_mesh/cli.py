@@ -13,6 +13,7 @@ import typer
 
 from .config import find_config_path, load_config
 from .installer import HarnessInstaller
+from .lineage import _effective_call_depth, _merge_trace_chain, _resolved_lineage
 from .models import (
     QuotaExhaustedPolicy,
     TaskDifficulty,
@@ -61,6 +62,20 @@ def _runtime(ctx: typer.Context):
         config_path=options.get("config"),
         workspace_root=options.get("workspace") or os.getcwd(),
     )
+
+
+def _trace_chain_option(raw: str | None) -> list[str] | None:
+    """Parse ``--trace-chain`` the same way the MCP tool accepts its list."""
+
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(payload, list):
+        return [str(item) for item in payload]
+    return None
 
 
 def _echo_install_results(results) -> None:
@@ -314,47 +329,44 @@ def dispatch(
     context_file: Optional[list[str]] = typer.Option(None, "--context-file", help="Context file path (repeatable)."),
     auto_match_skills: bool = typer.Option(False, "--auto-match-skills"),
     call_depth: Optional[int] = typer.Option(
-        None, "--call-depth", help="Nested call depth (defaults to HARNESS_MESH_CALL_DEPTH)."
+        None,
+        "--call-depth",
+        help="Nested call depth; only raises the depth inherited from the environment or the ledger.",
     ),
     trace_chain: Optional[str] = typer.Option(
-        None, "--trace-chain", help="JSON list of ancestor harnesses (defaults to HARNESS_MESH_TRACE_CHAIN)."
+        None,
+        "--trace-chain",
+        help="JSON list of ancestor harnesses, merged with the environment and the ledger chain.",
     ),
     json_output: bool = typer.Option(True, "--json/--no-json"),
 ) -> None:
     """Dispatch a ticket and print the assignment result."""
 
     options = ctx.obj or {}
-    resolved_depth = call_depth
-    if resolved_depth is None:
-        env_depth = os.environ.get("HARNESS_MESH_CALL_DEPTH")
-        resolved_depth = int(env_depth) if env_depth and env_depth.isdigit() else 0
-    resolved_trace: list[str] = []
-    raw_trace = trace_chain or os.environ.get("HARNESS_MESH_TRACE_CHAIN")
-    if raw_trace:
-        try:
-            parsed_trace = json.loads(raw_trace)
-            if isinstance(parsed_trace, list):
-                resolved_trace = [str(item) for item in parsed_trace]
-        except json.JSONDecodeError:
-            resolved_trace = []
-    request = TaskRequest(
-        target_harness=harness,
-        objective=objective,
-        difficulty=TaskDifficulty(difficulty),
-        model=model,
-        on_quota_exhausted=QuotaExhaustedPolicy(policy),
-        fallback_harnesses=list(fallback or []),
-        timeout_seconds=timeout,
-        workspace_mode=WorkspaceMode(workspace_mode),
-        workspace_root=options.get("workspace") or os.getcwd(),
-        context_files=list(context_file or []),
-        auto_match_skills=auto_match_skills,
-        call_depth=resolved_depth,
-        trace_chain=resolved_trace,
-        parent_task_id=os.environ.get("HARNESS_MESH_TASK_ID"),
-    )
+    # The command line is a reachable entry point for a worker shell, so it
+    # resolves lineage from the same ledger as the MCP server instead of
+    # trusting --call-depth or the (host-controlled) environment alone.
     runtime = _runtime(ctx)
     try:
+        lineage = _resolved_lineage(runtime.router)
+        inherited_depth = lineage.call_depth if lineage is not None else 0
+        inherited_trace = list(lineage.trace_chain) if lineage is not None else []
+        request = TaskRequest(
+            target_harness=harness,
+            objective=objective,
+            difficulty=TaskDifficulty(difficulty),
+            model=model,
+            on_quota_exhausted=QuotaExhaustedPolicy(policy),
+            fallback_harnesses=list(fallback or []),
+            timeout_seconds=timeout,
+            workspace_mode=WorkspaceMode(workspace_mode),
+            workspace_root=options.get("workspace") or os.getcwd(),
+            context_files=list(context_file or []),
+            auto_match_skills=auto_match_skills,
+            call_depth=_effective_call_depth(call_depth, inherited_depth),
+            trace_chain=_merge_trace_chain(_trace_chain_option(trace_chain), inherited_trace),
+            parent_task_id=os.environ.get("HARNESS_MESH_TASK_ID"),
+        )
         result = asyncio.run(runtime.router.dispatch(request))
     finally:
         runtime.storage.close()
