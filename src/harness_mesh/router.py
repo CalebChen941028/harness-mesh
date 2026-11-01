@@ -139,7 +139,6 @@ class MeshRouter:
             self.monitor.on_quota_recovered = self.on_quota_recovered
 
         self._running_tasks: dict[str, asyncio.Task] = {}
-        self._active_assignments = 0
         self._task_locks: dict[str, asyncio.Lock] = {}
         self._resuming: set[str] = set()
         self._workspace_cache: dict[str, WorkspaceManager] = {
@@ -204,15 +203,15 @@ class MeshRouter:
     async def _dispatch(self, request: TaskRequest) -> TaskResult:
         started = self.now_fn()
         target = request.target_harness.strip()
-        if (
-            self.config.max_active_assignments >= 0
-            and self._active_assignments >= self.config.max_active_assignments
-        ):
-            return self._rejected_result(
-                request,
-                f"max_active_assignments limit reached ({self.config.max_active_assignments})",
-                started,
-            )
+        if self.config.max_active_assignments >= 0:
+            # Every worker harness starts its own MCP server with its own
+            # router instance, so the cap must come from the shared ledger.
+            if self.storage.count_live_assignments() >= self.config.max_active_assignments:
+                return self._rejected_result(
+                    request,
+                    f"max_active_assignments limit reached ({self.config.max_active_assignments})",
+                    started,
+                )
         trace_chain = list(request.trace_chain)
 
         rejection = self._check_recursion(target, request, trace_chain)
@@ -499,27 +498,23 @@ class MeshRouter:
                 ),
             )
             call_started = self.now_fn()
-            self._active_assignments += 1
             try:
-                try:
-                    raw_outcome = await asyncio.wait_for(
-                        adapter.execute(call), timeout=max(1.0, float(timeout_seconds)) + 1.0
-                    )
-                except asyncio.TimeoutError:
-                    raw_outcome = AdapterOutcome(
-                        exit_code=124,
-                        timed_out=True,
-                        stderr=f"[harness-mesh] assignment timed out after {timeout_seconds}s",
-                        error_detail="timeout",
-                    )
-                except Exception as exc:
-                    raw_outcome = AdapterOutcome(
-                        exit_code=1,
-                        stderr=str(exc),
-                        error_detail=f"adapter_exception: {exc}",
-                    )
-            finally:
-                self._active_assignments = max(0, self._active_assignments - 1)
+                raw_outcome = await asyncio.wait_for(
+                    adapter.execute(call), timeout=max(1.0, float(timeout_seconds)) + 1.0
+                )
+            except asyncio.TimeoutError:
+                raw_outcome = AdapterOutcome(
+                    exit_code=124,
+                    timed_out=True,
+                    stderr=f"[harness-mesh] assignment timed out after {timeout_seconds}s",
+                    error_detail="timeout",
+                )
+            except Exception as exc:
+                raw_outcome = AdapterOutcome(
+                    exit_code=1,
+                    stderr=str(exc),
+                    error_detail=f"adapter_exception: {exc}",
+                )
             outcome = self._normalize_outcome(raw_outcome)
             if outcome.duration_ms <= 0:
                 outcome.duration_ms = int((self.now_fn() - call_started) * 1000)

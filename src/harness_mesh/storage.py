@@ -31,6 +31,7 @@ from .models import (
     TaskResourcePage,
     TaskResult,
     TaskStatus,
+    utc_now,
 )
 
 
@@ -44,6 +45,19 @@ class TaskNotFoundError(StateStoreError):
 
 class ResourceNotFoundError(StateStoreError):
     pass
+
+
+def _pid_alive(pid: int) -> bool:
+    """True while the process exists (zombies still count as alive)."""
+
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError, ValueError):
+        # A permission error means the pid exists but belongs to another user.
+        return True
+    return True
 
 
 _SCHEMA = """
@@ -119,6 +133,7 @@ CREATE TABLE IF NOT EXISTS assignments (
     pid INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_assignments_task ON assignments(task_id, attempt);
+CREATE INDEX IF NOT EXISTS idx_assignments_status ON assignments(status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_assignments_task_attempt_unique ON assignments(task_id, attempt);
 
 CREATE TABLE IF NOT EXISTS failover_hops (
@@ -830,6 +845,31 @@ class StateStore:
                 (task_id,),
             ).fetchone()
         return self._row_to_assignment(row) if row is not None else None
+
+    def count_live_assignments(self) -> int:
+        """Count running assignments whose process is still alive.
+
+        A row whose pid no longer exists is a leftover from a crashed host; it
+        is closed as ``ended_error``/``stale`` instead of occupying a slot
+        forever.  Rows without a pid predate the column and are treated as
+        alive because their owner cannot be proven dead.
+        """
+
+        live = 0
+        stale: list[str] = []
+        for record in self.list_running_assignments():
+            if record.pid is None or _pid_alive(record.pid):
+                live += 1
+            else:
+                stale.append(record.assignment_id)
+        for assignment_id in stale:
+            self.update_assignment(
+                assignment_id,
+                status="ended_error",
+                ended_at=utc_now(),
+                error_reason="stale",
+            )
+        return live
 
     def add_failover_hop(self, task_id: str, hop: FailoverHop) -> FailoverHop:
         with self._lock:
