@@ -324,7 +324,7 @@ hmesh init-mcp [--print] [--target PATH]
 | `market.ttl_seconds` | `21600` | OpenRouter 与 models.dev 的缓存时长 |
 | `market.wait_seconds` | `8` | 自动刷新在派发或命令继续前的最长等待 |
 | `market.sources` | 四个来源 | 需要刷新的来源 |
-| `market.first_party_providers` | `[]`（示例配置列出十个） | 用自家 models.dev 条目定标价的厂商 |
+| `market.first_party_providers` | `[]`（示例配置列出十二个） | 用自家 models.dev 条目定标价的厂商 |
 | `market.epoch.reasoning_benchmarks` | 六个基准 | 推理轴使用的基准 |
 | `market.epoch.coding_benchmarks` | 九个基准 | 编码轴使用的基准 |
 | `market.epoch.reference_window_days` | `540` | 基准最新发布日期之前的百分位窗口 |

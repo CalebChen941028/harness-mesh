@@ -81,6 +81,8 @@ market:
     - zhipuai
     - alibaba
     - moonshotai
+    - minimax
+    - minimax-cn
     - xai
     - mistral
   artificial_analysis_key_env: ARTIFICIAL_ANALYSIS_API_KEY

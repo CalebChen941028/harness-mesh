@@ -359,7 +359,7 @@ Key settings:
 | `market.ttl_seconds` | `21600` | Snapshot lifetime for OpenRouter and models.dev |
 | `market.wait_seconds` | `8` | Longest automatic refresh before dispatch or a command continues |
 | `market.sources` | four sources | Providers to refresh |
-| `market.first_party_providers` | `[]` (the example config lists ten) | Vendors whose own models.dev entry sets the list price |
+| `market.first_party_providers` | `[]` (the example config lists twelve) | Vendors whose own models.dev entry sets the list price |
 | `market.epoch.reasoning_benchmarks` | six benchmarks | Benchmarks that feed the reasoning axis |
 | `market.epoch.coding_benchmarks` | nine benchmarks | Benchmarks that feed the coding axis |
 | `market.epoch.reference_window_days` | `540` | Percentile window before a benchmark's latest release |
