@@ -1986,6 +1986,7 @@ class MeshRouter:
         category: str = "note",
         author_harness: str = "controller",
         task_id: str | None = None,
+        source: str = "controller",
     ) -> dict[str, Any]:
         return self.context.update(
             key,
@@ -1993,6 +1994,7 @@ class MeshRouter:
             category=category,
             author_harness=author_harness,
             task_id=task_id,
+            source=source,
         )
 
     def get_task_status(self, task_id: str) -> dict[str, Any]:

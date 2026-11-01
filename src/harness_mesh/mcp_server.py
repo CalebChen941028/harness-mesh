@@ -383,12 +383,14 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
         """Write or update one shared project fact or interface contract."""
 
         try:
+            source = "worker" if _task_id_from_cwd(router) or os.environ.get("HARNESS_MESH_TASK_ID") else "controller"
             return router.update_project_context(
                 key,
                 content,
                 category=category,
                 author_harness=author_harness,
                 task_id=task_id,
+                source=source,
             )
         except Exception as exc:
             return {"error": _error_detail(exc), "key": key}

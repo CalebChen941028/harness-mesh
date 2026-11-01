@@ -150,6 +150,7 @@ CREATE TABLE IF NOT EXISTS project_context_entries (
     content TEXT NOT NULL,
     author_harness TEXT NOT NULL DEFAULT 'controller',
     task_id TEXT,
+    source TEXT NOT NULL DEFAULT 'controller',
     updated_at REAL NOT NULL
 );
 
@@ -176,7 +177,18 @@ class StateStore:
         self._conn.execute("PRAGMA foreign_keys=ON")
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(project_context_entries)").fetchall()
+        }
+        if "source" not in columns:
+            self._conn.execute(
+                "ALTER TABLE project_context_entries ADD COLUMN source TEXT NOT NULL DEFAULT 'controller'"
+            )
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -445,6 +457,7 @@ class StateStore:
         category: str = "note",
         author_harness: str = "controller",
         task_id: str | None = None,
+        source: str = "controller",
     ) -> dict[str, Any]:
         now = time.time()
         key = str(key).strip()[:128] or "untitled"
@@ -453,16 +466,17 @@ class StateStore:
             self._conn.execute(
                 """
                 INSERT INTO project_context_entries
-                    (key, category, content, author_harness, task_id, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (key, category, content, author_harness, task_id, source, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(key) DO UPDATE SET
                     category=excluded.category,
                     content=excluded.content,
                     author_harness=excluded.author_harness,
                     task_id=excluded.task_id,
+                    source=excluded.source,
                     updated_at=excluded.updated_at
                 """,
-                (key, category, content, author_harness, task_id, now),
+                (key, category, content, author_harness, task_id, source, now),
             )
             self._conn.commit()
         return {
@@ -471,6 +485,7 @@ class StateStore:
             "content": content,
             "author_harness": author_harness,
             "task_id": task_id,
+            "source": source,
             "updated_at": now,
         }
 
