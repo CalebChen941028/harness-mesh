@@ -54,6 +54,36 @@ python3 -m venv .venv
 .venv/bin/pip install -e ".[antigravity]"
 ```
 
+## 一键安装到桌面 Harness
+
+安装 Python 包后，在当前项目目录执行一条命令，即可把 Harness-Mesh 注册到本机已安装的桌面 Harness：
+
+```bash
+cd /path/to/your/project
+hmesh install
+```
+
+安装内容：
+
+| Harness | 集成方式 |
+| :--- | :--- |
+| Claude Code | `claude mcp add` 注册 user 级 MCP Server |
+| OpenAI Codex / ChatGPT 桌面版 | `codex mcp add` 写入 `~/.codex/config.toml` |
+| Google Antigravity | `agy mcp add` 写入 `~/.gemini/config/mcp_config.json` |
+| ZCode | 生成 MCP 插件与本地插件市场，使用 `zcode plugins` 注册并安装；CLI 不可用时保留市场文件，供 UI 添加 |
+| DeepSeek Harness | 向 `~/.dsh/profiles/{desktop,headless}/cordis.patch.yml` 写入 `@deepseek-ai/dsh-mcp-client` 条目（先备份） |
+
+常用参数：
+
+```bash
+hmesh install --dry-run                 # 只显示计划执行的命令/文件，不修改任何配置
+hmesh install --harness zcode           # 只安装一个 Harness（可重复）
+hmesh install --workspace /path/project # 显式绑定 MCP 工作区
+hmesh install --uninstall               # 卸载集成
+```
+
+安装后重启对应桌面应用，并新建会话/任务；旧会话可能缓存旧工具列表。安装器是幂等的：重复执行会替换已有注册，不会产生重复 DSH 条目。
+
 ## 快速开始
 
 ```bash
@@ -158,6 +188,7 @@ Ticket task_x（一份 Git Worktree）
 ## CLI
 
 ```text
+hmesh install [--dry-run] [--harness H]... [--uninstall]
 hmesh status [--refresh] [--json]
 hmesh models [--refresh] [--harness H]
 hmesh quota [--probe]

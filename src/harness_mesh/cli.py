@@ -10,6 +10,8 @@ from typing import Any, Optional
 
 import typer
 
+from .config import find_config_path, load_config
+from .installer import HarnessInstaller
 from .models import (
     QuotaExhaustedPolicy,
     TaskDifficulty,
@@ -57,6 +59,42 @@ def _runtime(ctx: typer.Context):
         config_path=options.get("config"),
         workspace_root=options.get("workspace") or os.getcwd(),
     )
+
+
+@app.command()
+def install(
+    ctx: typer.Context,
+    harness: Optional[list[str]] = typer.Option(
+        None, "--harness", "-H", help="Install only this harness (repeatable). Default: all detected."
+    ),
+    uninstall: bool = typer.Option(False, "--uninstall", help="Remove the MCP/plugin integration."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show planned commands/files without changing anything."),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """One-command installation of Harness-Mesh into every detected harness UI."""
+
+    options = ctx.obj or {}
+    workspace = options.get("workspace") or os.getcwd()
+    config_path = options.get("config")
+    config = load_config(config_path, workspace)
+    installer = HarnessInstaller(
+        config,
+        workspace,
+        config_path=config_path or find_config_path(workspace),
+        dry_run=dry_run,
+    )
+    results = installer.install(harness, uninstall=uninstall)
+    if json_output:
+        typer.echo(_json([result.as_dict() for result in results]))
+    else:
+        for result in results:
+            typer.echo(f"{result.harness:12} {result.action:12} {result.detail}")
+            for path in result.files:
+                typer.echo(f"  file: {path}")
+            for command in result.commands:
+                typer.echo(f"  cmd : {' '.join(command)}")
+    if any(result.action == "failed" for result in results):
+        raise typer.Exit(code=1)
 
 
 @app.command()

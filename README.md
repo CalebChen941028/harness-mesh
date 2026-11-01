@@ -59,6 +59,36 @@ Optional Antigravity Python SDK support:
 .venv/bin/pip install -e ".[antigravity]"
 ```
 
+## One-command install into desktop harnesses
+
+After installing the Python package, register Harness-Mesh in every detected desktop harness with one command:
+
+```bash
+cd /path/to/your/project
+hmesh install
+```
+
+What it installs:
+
+| Harness | Integration |
+| :--- | :--- |
+| Claude Code | `claude mcp add` user-scope MCP server |
+| OpenAI Codex / ChatGPT desktop | `codex mcp add` MCP server in `~/.codex/config.toml` |
+| Google Antigravity | `agy mcp add` MCP server in `~/.gemini/config/mcp_config.json` |
+| ZCode | Generates a local MCP plugin + marketplace, registers/installs it through `zcode plugins`; if the CLI is unavailable, leaves the marketplace ready for the UI |
+| DeepSeek Harness | Adds an `@deepseek-ai/dsh-mcp-client` entry to `~/.dsh/profiles/{desktop,headless}/cordis.patch.yml` (with backup) |
+
+Useful options:
+
+```bash
+hmesh install --dry-run                 # print planned commands/files, change nothing
+hmesh install --harness zcode           # one harness only (repeatable)
+hmesh install --workspace /path/project # pin the MCP workspace explicitly
+hmesh install --uninstall               # remove integrations
+```
+
+Restart the desktop application after installation and start a new chat/task. Existing chats may keep a cached tool list. The installer is idempotent; editing an existing DSH entry or re-adding an MCP server replaces the previous registration rather than duplicating it.
+
 ## Quick start
 
 ```bash
@@ -179,6 +209,7 @@ These blocks are project data, not instructions that override the ticket objecti
 ## CLI
 
 ```text
+hmesh install [--dry-run] [--harness H]... [--uninstall]
 hmesh status [--refresh] [--json]
 hmesh models [--refresh] [--harness H]
 hmesh quota [--probe]

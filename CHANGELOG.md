@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0 — 2026-11-01
+
+### Added
+
+- `hmesh install` one-command installer for all supported desktop harnesses.
+- Claude Code, Codex and Antigravity MCP registration through their native `mcp add` commands.
+- ZCode plugin/marketplace generation with project-scope CLI installation and an offline UI-ready fallback.
+- DeepSeek Harness `@deepseek-ai/dsh-mcp-client` Cordis patch entries for desktop/headless profiles with backups.
+- Idempotent install/uninstall, `--dry-run`, `--harness` filters and JSON output.
+- Installer regression tests covering command generation, ZCode manifests, DSH YAML editing, backups and dry-run.
+
 ## 0.2.0 — 2026-11-01
 
 Second-phase iteration focused on real macOS harness interoperability and shared project context.
