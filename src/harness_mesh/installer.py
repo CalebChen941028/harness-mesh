@@ -6,6 +6,7 @@ listed here, writes backups before first modification, and is idempotent.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -86,6 +87,81 @@ class DoctorResult:
             "detail": self.detail,
             "command": self.command,
             "approvals": self.approvals,
+        }
+
+
+INTEGRATION_STATUSES = (
+    "integrated",
+    "detected_not_integrated",
+    "stale",
+    "not_detected",
+    "ignored",
+)
+
+
+@dataclass
+class IntegrationStatus:
+    """Whether another harness can already reach Mesh as an MCP controller."""
+
+    harness: str
+    display_name: str
+    status: str
+    detected: bool = False
+    registered: bool = False
+    ignored: bool = False
+    binary_path: str | None = None
+    detail: str = ""
+    registration_files: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "harness": self.harness,
+            "display_name": self.display_name,
+            "status": self.status,
+            "detected": self.detected,
+            "registered": self.registered,
+            "ignored": self.ignored,
+            "binary_path": self.binary_path,
+            "detail": self.detail,
+            "registration_files": self.registration_files,
+        }
+
+
+@dataclass
+class IntegrationPlan:
+    """The exact, reviewable changes an install would make."""
+
+    harness: str
+    display_name: str
+    approve_level: str
+    plan_id: str
+    action: str
+    detail: str = ""
+    files: list[str] = field(default_factory=list)
+    entries: list[str] = field(default_factory=list)
+    commands: list[list[str]] = field(default_factory=list)
+    detected: bool = False
+    registered: bool = False
+
+    @property
+    def installable(self) -> bool:
+        return self.action in {"would_install", "ready"}
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "harness": self.harness,
+            "display_name": self.display_name,
+            "approve_level": self.approve_level,
+            "plan_id": self.plan_id,
+            "action": self.action,
+            "detail": self.detail,
+            "files": self.files,
+            "entries": self.entries,
+            "commands": self.commands,
+            "detected": self.detected,
+            "registered": self.registered,
+            "installable": self.installable,
+            "restart_required": True,
         }
 
 
@@ -186,6 +262,7 @@ class HarnessInstaller:
                 None,
                 self.home_dir,
                 allow_system_paths=self.allow_system_paths,
+                create_shim=False,
             )
             if binary is not None:
                 installed.append(name)
@@ -196,6 +273,314 @@ class HarnessInstaller:
             ):
                 installed.append(name)
         return installed
+
+    # ------------------------------------------------------------------
+    # integration discovery and reviewable plans
+    # ------------------------------------------------------------------
+    def integration_status(self) -> list[IntegrationStatus]:
+        """Report every enabled harness without changing any file."""
+
+        ignored = {str(name) for name in self.config.integration.ignore}
+        statuses: list[IntegrationStatus] = []
+        for harness, cfg in self.config.harnesses.items():
+            if not cfg.enabled:
+                continue
+            display = cfg.display_name or harness.replace("_", " ").title()
+            detected, binary = self._integration_detected(harness)
+            registration = self._read_registration(harness)
+            registered = registration is not None
+            command = str((registration or {}).get("command") or "")
+            stale = registered and not self._registered_command_works(command)
+            if harness in ignored:
+                status = "ignored"
+                detail = "integration hints are disabled by integration.ignore"
+                if stale:
+                    detail += (
+                        "; registered command is missing or not executable: "
+                        + command
+                    )
+            elif stale:
+                status = "stale"
+                detail = (
+                    f"registered command is missing or not executable: {command}; "
+                    f"run `hmesh install --harness {harness}`"
+                )
+            elif registered:
+                status = "integrated"
+                detail = "MCP/plugin registration found"
+            elif detected:
+                status = "detected_not_integrated"
+                detail = (
+                    f"{display} is installed but harness-mesh is not registered; "
+                    f"run `hmesh install --harness {harness}`"
+                )
+            else:
+                status = "not_detected"
+                detail = "harness binary or app bundle not found"
+            statuses.append(
+                IntegrationStatus(
+                    harness=harness,
+                    display_name=display,
+                    status=status,
+                    detected=detected,
+                    registered=registered,
+                    ignored=harness in ignored,
+                    binary_path=binary,
+                    detail=detail,
+                    registration_files=[
+                        str(path) for path in self._registration_files(harness)
+                    ],
+                )
+            )
+        return statuses
+
+    @staticmethod
+    def integration_hint(status: IntegrationStatus) -> str | None:
+        """One sentence telling a controller what to do next, if anything."""
+
+        if status.status == "detected_not_integrated":
+            return (
+                f"{status.display_name} is installed but harness-mesh is not "
+                f'registered; call plan_integration(harness="{status.harness}") '
+                "and ask the user before install_integration"
+            )
+        if status.status == "stale":
+            return (
+                f"{status.display_name} is registered but its command no longer "
+                f'starts; call plan_integration(harness="{status.harness}") and '
+                "ask the user before install_integration"
+            )
+        return None
+
+    def integration_plan(self, harness: str, approve_level: str) -> IntegrationPlan:
+        """Build the same plan ``install`` would apply, without writing."""
+
+        level = self._validate_integration_request(harness, approve_level)
+        planner = self._integration_clone(approve_level=level, dry_run=True)
+        result = planner.install([harness])[0]
+        detected, _ = planner._integration_detected(harness)
+        registration = planner._read_registration(harness)
+        files = list(result.files)
+        entries = list(result.approvals.get("entries") or [])
+        commands = [list(command) for command in result.commands]
+        observed = planner._integration_observation(harness, files)
+        canonical = {
+            "harness": harness,
+            "approve_level": level,
+            "files": files,
+            "entries": entries,
+            "commands": commands,
+            "action": result.action,
+            "observed": observed,
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                canonical,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        cfg = self.config.harnesses[harness]
+        return IntegrationPlan(
+            harness=harness,
+            display_name=cfg.display_name or harness.replace("_", " ").title(),
+            approve_level=level,
+            plan_id=digest,
+            action=result.action,
+            detail=result.detail.removeprefix("[dry-run] ").strip(),
+            files=files,
+            entries=entries,
+            commands=commands,
+            detected=detected,
+            registered=registration is not None,
+        )
+
+    def install_integration(
+        self, harness: str, approve_level: str, plan_id: str
+    ) -> dict[str, Any]:
+        """Install one harness only when ``plan_id`` still matches its plan."""
+
+        plan = self.integration_plan(harness, approve_level)
+        base = {
+            "harness": harness,
+            "approve_level": plan.approve_level,
+            "plan_id": plan.plan_id,
+            "restart_required": False,
+        }
+        if not isinstance(plan_id, str) or plan_id != plan.plan_id:
+            return {
+                **base,
+                "installed": False,
+                "error": (
+                    "plan_id does not match the current plan; call "
+                    "plan_integration again and review the new plan"
+                ),
+            }
+        if not plan.installable:
+            return {
+                **base,
+                "installed": False,
+                "action": plan.action,
+                "detail": plan.detail,
+                "files": plan.files,
+                "entries": plan.entries,
+                "commands": plan.commands,
+                "error": plan.detail or f"installation cannot proceed ({plan.action})",
+            }
+        installer = self._integration_clone(approve_level=plan.approve_level, dry_run=False)
+        result = installer.install([harness])[0]
+        payload: dict[str, Any] = {
+            **base,
+            "installed": result.installed,
+            "action": result.action,
+            "detail": result.detail,
+            "files": list(result.files),
+            "entries": list(result.approvals.get("entries") or []),
+            "commands": [list(command) for command in result.commands],
+        }
+        if result.installed:
+            payload["restart_required"] = True
+        else:
+            payload["error"] = result.detail or f"installation {result.action}"
+        return payload
+
+    def _validate_integration_request(self, harness: str, approve_level: str) -> str:
+        if not isinstance(harness, str):
+            raise ValueError("unknown or disabled harness: harness must be a name")
+        cfg = self.config.harnesses.get(harness)
+        if cfg is None or not cfg.enabled:
+            raise ValueError(
+                f"unknown or disabled harness: {harness!r}; expected one of: "
+                + ", ".join(self.config.enabled_harnesses())
+            )
+        if not isinstance(approve_level, str):
+            raise ValueError(
+                "unknown approval level; expected one of: "
+                + ", ".join(APPROVAL_LEVELS)
+            )
+        level = approve_level.lower()
+        if level not in APPROVAL_LEVELS:
+            raise ValueError(
+                f"unknown approval level {approve_level!r}; expected one of: "
+                + ", ".join(APPROVAL_LEVELS)
+            )
+        return level
+
+    def _integration_clone(
+        self, *, approve_level: str, dry_run: bool
+    ) -> "HarnessInstaller":
+        return HarnessInstaller(
+            self.config,
+            self.workspace_root,
+            home_dir=self.home_dir,
+            env=self.env,
+            which=self.which,
+            runner=self.runner,
+            config_path=self.config_path,
+            dry_run=dry_run,
+            allow_system_paths=self.allow_system_paths,
+            approval_level=approve_level,
+        )
+
+    def _integration_detected(self, harness: str) -> tuple[bool, str | None]:
+        cfg = self.config.harnesses[harness]
+        binary = resolve_harness_binary(
+            cfg,
+            self.which,
+            self.state_dir,
+            self.home_dir,
+            allow_system_paths=(
+                self.allow_system_paths and not self._system_binaries_disabled()
+            ),
+            create_shim=False,
+        )
+        if binary is not None:
+            return True, binary
+        if harness == "zcode" and self._zcode_app_detected():
+            return True, None
+        return False, None
+
+    def _zcode_app_detected(self) -> bool:
+        if self._system_binaries_disabled():
+            return False
+        cfg = self.config.harnesses.get("zcode")
+        extra = cfg.extra if cfg is not None else {}
+        values = [
+            str(extra.get(key) or "").strip()
+            for key in ("macos_electron_bin", "macos_cjs_entry")
+        ]
+        if not all(values):
+            return False
+        return all(Path(value).expanduser().exists() for value in values)
+
+    def _system_binaries_disabled(self) -> bool:
+        values = (
+            os.environ.get("HARNESS_MESH_DISABLE_SYSTEM_BINARIES"),
+            self.env.get("HARNESS_MESH_DISABLE_SYSTEM_BINARIES"),
+        )
+        return any(
+            str(value).lower() in {"1", "true", "yes"}
+            for value in values
+            if value is not None
+        )
+
+    def _approval_files(self, harness: str) -> list[Path]:
+        try:
+            return [self._approval_path(harness)]
+        except ValueError:
+            return []
+
+    def _registered_command_works(self, command: str) -> bool:
+        if not command:
+            return False
+        resolved = command if os.path.isabs(command) else self.which(command)
+        if not resolved:
+            return False
+        path = Path(resolved)
+        return path.is_file() and os.access(path, os.X_OK)
+
+    def _registration_files(self, harness: str) -> list[Path]:
+        if harness == "claude_code":
+            return [self.home_dir / ".claude.json"]
+        if harness == "codex":
+            return [self.home_dir / ".codex" / "config.toml"]
+        if harness == "antigravity":
+            return [self.home_dir / ".gemini" / "config" / "mcp_config.json"]
+        if harness == "zcode":
+            return [
+                self.state_dir
+                / "zcode-plugin"
+                / "plugins"
+                / ZCODE_PLUGIN_NAME
+                / ".zcode-plugin"
+                / "plugin.json"
+            ]
+        if harness == "deepseek":
+            return list(self._dsh_patch_files())
+        return []
+
+    def _integration_observation(
+        self, harness: str, files: Iterable[str]
+    ) -> dict[str, str | None]:
+        observed: dict[str, str | None] = {}
+        paths = (
+            [Path(path) for path in files]
+            + self._registration_files(harness)
+            + self._approval_files(harness)
+        )
+        for path in paths:
+            key = str(path)
+            if key in observed:
+                continue
+            try:
+                if path.is_file():
+                    observed[key] = hashlib.sha256(path.read_bytes()).hexdigest()
+                else:
+                    observed[key] = None
+            except OSError:
+                observed[key] = "unreadable"
+        return observed
 
     def doctor(self, harnesses: Iterable[str] | None = None) -> list[DoctorResult]:
         requested = list(harnesses or [])
@@ -343,6 +728,7 @@ class HarnessInstaller:
             self.state_dir,
             self.home_dir,
             allow_system_paths=self.allow_system_paths,
+            create_shim=not self.dry_run,
         )
 
     def _env_flags(self, style: str) -> list[str]:
@@ -967,6 +1353,8 @@ class HarnessInstaller:
         return [marketplace, manifest, skill]
 
     def _zcode_app_present(self) -> bool:
+        if self._system_binaries_disabled():
+            return False
         config = self.config.harnesses.get("zcode")
         extra = config.extra if config is not None else {}
         for key in ("macos_electron_bin", "macos_cjs_entry"):
@@ -1433,4 +1821,11 @@ def _remove_dsh_block(path: Path) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-__all__ = ["HarnessInstaller", "InstallResult", "MCP_SERVER_NAME"]
+__all__ = [
+    "HarnessInstaller",
+    "InstallResult",
+    "IntegrationPlan",
+    "IntegrationStatus",
+    "INTEGRATION_STATUSES",
+    "MCP_SERVER_NAME",
+]

@@ -97,6 +97,7 @@ def resolve_harness_binary(
     home_dir: str | Path | None = None,
     *,
     allow_system_paths: bool | None = None,
+    create_shim: bool = True,
 ) -> str | None:
     """Resolve a harness binary from PATH, configured macOS bundle paths and shims.
 
@@ -155,6 +156,11 @@ def resolve_harness_binary(
                 )
             )
             shim = Path(state_dir).expanduser() / "bin" / "zcode"
+            if not create_shim:
+                # Planning and status checks must not create files; reporting
+                # the deterministic shim path keeps the plan identical to the
+                # install that follows.
+                return str(shim)
             try:
                 shim.parent.mkdir(parents=True, exist_ok=True)
                 shim.write_text(
@@ -288,6 +294,16 @@ class RoutingConfig(BaseModel):
     pins: dict[str, RoutingPinConfig] = Field(default_factory=dict)
 
 
+class IntegrationConfig(BaseModel):
+    """Discovery preferences for registering Mesh into other harnesses."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    # Harnesses whose integration hints are suppressed.  Detection still
+    # reports the underlying facts under ``ignored``.
+    ignore: list[str] = Field(default_factory=list)
+
+
 class MeshConfig(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
@@ -330,6 +346,7 @@ class MeshConfig(BaseModel):
     plugin_roots: list[str] = Field(default_factory=list)
     market: MarketConfig = Field(default_factory=MarketConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
+    integration: IntegrationConfig = Field(default_factory=IntegrationConfig)
     harnesses: dict[str, HarnessConfig] = Field(default_factory=dict)
 
     def enabled_harnesses(self) -> list[str]:
