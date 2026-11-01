@@ -14,6 +14,7 @@ from typing import Any, Iterable, Mapping
 
 from .config import cap_text
 from .models import ContinuationCheckpoint, TaskRequest, utc_now
+from .security import SENSITIVE_FILE_PATTERNS, is_sensitive_name
 
 
 class WorkspaceError(RuntimeError):
@@ -77,6 +78,7 @@ class WorkspaceManager:
         git_binary: str = "git",
         env: Mapping[str, str] | None = None,
         baseline_ref: str = "HEAD",
+        auto_init_repo: bool = False,
     ):
         self.workspace_root = Path(workspace_root).expanduser().resolve()
         state_candidate = Path(os.path.expanduser(str(state_dir_name)))
@@ -90,6 +92,7 @@ class WorkspaceManager:
             self.env.update(env)
         self.env.setdefault("GIT_TERMINAL_PROMPT", "0")
         self.baseline_ref = baseline_ref
+        self.auto_init_repo = bool(auto_init_repo)
 
     # ------------------------------------------------------------------
     # low-level git helpers
@@ -151,8 +154,13 @@ class WorkspaceManager:
 
         self.workspace_root.mkdir(parents=True, exist_ok=True)
         if not self.is_git_repo() or not self._is_repo_toplevel():
+            if not self.auto_init_repo:
+                raise WorkspaceError(
+                    f"workspace is not a Git repository: {self.workspace_root}; "
+                    "run `git init` there or set auto_init_repo: true in harness-mesh config"
+                )
             self._git(["init", "-q"], check=True)
-        self._exclude_state_dir()
+        self._ensure_git_excludes()
         head = self._git(["rev-parse", "--verify", "HEAD"])
         if head.returncode != 0:
             self._git(["add", "-A", "--", "."], check=True)
@@ -171,7 +179,7 @@ class WorkspaceManager:
                 check=True,
             )
 
-    def _exclude_state_dir(self) -> None:
+    def _ensure_git_excludes(self) -> None:
         git_dir = self._git(["rev-parse", "--git-dir"], cwd=self.workspace_root)
         if git_dir.returncode != 0:
             return
@@ -181,18 +189,21 @@ class WorkspaceManager:
         info_dir = git_dir_path / "info"
         info_dir.mkdir(parents=True, exist_ok=True)
         exclude_file = info_dir / "exclude"
-        existing = ""
-        if exclude_file.exists():
-            existing = exclude_file.read_text(encoding="utf-8", errors="replace")
+        existing = exclude_file.read_text(encoding="utf-8", errors="replace") if exclude_file.exists() else ""
+        entries: list[str] = []
         relative_state = self.state_dir.relative_to(self.workspace_root) if self._is_relative_to(
             self.state_dir, self.workspace_root
         ) else None
-        entry = f"/{relative_state.as_posix()}/" if relative_state else str(self.state_dir)
-        if entry not in existing.splitlines():
+        entries.append(f"/{relative_state.as_posix()}/" if relative_state else str(self.state_dir))
+        entries.extend(SENSITIVE_FILE_PATTERNS)
+        existing_lines = set(existing.splitlines())
+        additions = [entry for entry in entries if entry not in existing_lines]
+        if additions:
             with exclude_file.open("a", encoding="utf-8") as handle:
                 if existing and not existing.endswith("\n"):
                     handle.write("\n")
-                handle.write(entry + "\n")
+                for entry in additions:
+                    handle.write(entry + "\n")
 
     @staticmethod
     def _is_relative_to(path: Path, parent: Path) -> bool:
@@ -348,7 +359,7 @@ class WorkspaceManager:
         status = self._git(["status", "--porcelain", "-z"], cwd=self.workspace_root)
         if status.returncode == 0:
             for relative in self._parse_porcelain_paths(status.stdout):
-                if self._is_state_path(relative):
+                if self._is_state_path(relative) or is_sensitive_name(relative):
                     continue
                 src = self.workspace_root / relative
                 dst = worktree_path / relative
@@ -363,6 +374,8 @@ class WorkspaceManager:
         if status.returncode != 0:
             return
         for relative in self._parse_porcelain_paths(status.stdout):
+            if self._is_state_path(relative) or is_sensitive_name(relative):
+                continue
             src = self.workspace_root / relative
             dst = worktree_path / relative
             if src.is_file():
@@ -647,6 +660,8 @@ class WorkspaceManager:
             rel_path = Path(relative)
             if rel_path.is_absolute() or ".." in rel_path.parts:
                 raise WorkspaceError(f"refusing unsafe worktree path: {relative}")
+            if is_sensitive_name(rel_path.name):
+                continue
             src = (source / rel_path).resolve()
             dst = (target / rel_path).resolve()
             if not self._is_relative_to(src, source.resolve()) or not self._is_relative_to(dst, target_resolved):

@@ -100,7 +100,9 @@ class MeshRouter:
         self.now_fn = now_fn or time.monotonic
         self.sleep_fn = sleep_fn or asyncio.sleep
 
-        self.workspace = workspace or WorkspaceManager(self.workspace_root, config.state_dir)
+        self.workspace = workspace or WorkspaceManager(
+            self.workspace_root, config.state_dir, auto_init_repo=config.auto_init_repo
+        )
         self.discovery = discovery or ModelDiscoveryEngine(
             config,
             storage,
@@ -1007,7 +1009,9 @@ class MeshRouter:
     def _workspace_for(self, root: Path) -> WorkspaceManager:
         key = str(root)
         if key not in self._workspace_cache:
-            self._workspace_cache[key] = WorkspaceManager(root, self.config.state_dir)
+            self._workspace_cache[key] = WorkspaceManager(
+                root, self.config.state_dir, auto_init_repo=self.config.auto_init_repo
+            )
         return self._workspace_cache[key]
 
     def _check_recursion(self, target: str, request: TaskRequest, trace_chain: list[str]) -> str | None:
@@ -2115,7 +2119,7 @@ def create_mesh_runtime(
     )
     skills = SkillPluginManager(cfg, root, home_dir=home_dir, env=env)
     context = ProjectContextManager(storage, root)
-    workspace = WorkspaceManager(root, cfg.state_dir)
+    workspace = WorkspaceManager(root, cfg.state_dir, auto_init_repo=cfg.auto_init_repo)
     adapters = build_adapters(cfg, root, env=env)
     guardian = QuotaGuardian(
         storage,
