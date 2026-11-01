@@ -466,11 +466,11 @@ def models(
     else:
         entries = payload
     for name, item in entries.items():
-        typer.echo(f"[{name}]")
         if item.get("installed") is False:
             reason = item.get("reason") or item.get("error") or "binary not found"
-            typer.echo(f"  not installed ({reason})")
+            typer.echo(f"[{name}] not installed ({reason})")
             continue
+        typer.echo(f"[{name}]")
         if item.get("error"):
             typer.echo(f"  error: {item['error']}")
         for model in item.get("models", []):
