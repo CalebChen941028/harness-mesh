@@ -733,6 +733,13 @@ class WorkspaceManager:
         patch_args = ["apply", "--whitespace=nowarn", "--recount"]
         if strategy == "merge":
             patch_args.append("--3way")
+        preflight = self._git([*patch_args, "--check", "-"], cwd=target, input_text=changes.diff)
+        if preflight.returncode != 0:
+            conflicts = self._conflict_files(preflight.stderr + preflight.stdout, changes.modified_files)
+            raise WorkspaceError(
+                f"patch preflight failed for task {task_id}; conflicting files: "
+                f"{', '.join(conflicts) if conflicts else 'unknown'}; primary workspace left untouched"
+            )
         result = self._git([*patch_args, "-"], cwd=target, input_text=changes.diff)
         if result.returncode == 0:
             return ApplyResult(
@@ -761,6 +768,19 @@ class WorkspaceManager:
             used_fallback=True,
             detail=f"patch failed, copied files instead: {result.stderr.strip()[:500]}",
         )
+
+    @staticmethod
+    def _conflict_files(output: str, changed_files: Iterable[str]) -> list[str]:
+        conflicts: list[str] = []
+        for match in re.findall(r"patch failed: ([^:\n]+):", output):
+            name = match.strip()
+            if name and name not in conflicts:
+                conflicts.append(name)
+        if not conflicts:
+            for name in changed_files:
+                if name and name in output and name not in conflicts:
+                    conflicts.append(name)
+        return conflicts
 
     def _copy_changes(self, source: Path, target: Path, files: Iterable[str]) -> list[str]:
         applied: list[str] = []

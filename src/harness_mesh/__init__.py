@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 from .config import MeshConfig, build_handoff_prompt, evaluate_difficulty, load_config
 from .context import ProjectContextManager

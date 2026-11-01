@@ -1,4 +1,4 @@
-"""FastMCP server exposing the eleven cross-harness orchestration tools."""
+"""FastMCP server exposing the thirteen cross-harness orchestration tools."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from .models import (
 )
 from .router import MeshRouter, MeshRuntime, create_mesh_runtime
 from .storage import ResourceNotFoundError, TaskNotFoundError
+from .workspace import WorkspaceError
 
 TOOL_NAMES = [
     "list_harnesses",
@@ -279,11 +280,21 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
 
     @server.tool()
     def apply_task_patch(task_id: str, strategy: str = "patch") -> dict[str, Any]:
-        """Apply the isolated worktree changes back into the primary workspace."""
+        """Apply the isolated worktree changes back into the primary workspace.
 
+        Only ``patch`` and ``merge`` are exposed over MCP. The ``copy``
+        strategy is destructive and remains a CLI-only operation.
+        """
+
+        if strategy not in {"patch", "merge"}:
+            return {
+                "error": "MCP apply_task_patch supports only 'patch' or 'merge'; "
+                "use the CLI `hmesh apply --strategy copy --force-copy`",
+                "task_id": task_id,
+            }
         try:
             return router.apply_task_patch(task_id, strategy=strategy)
-        except (TaskNotFoundError, Exception) as exc:  # noqa: B014 - keep MCP responses structured
+        except (TaskNotFoundError, WorkspaceError, ValueError) as exc:
             return {"error": _error_detail(exc), "task_id": task_id}
 
     @server.tool()

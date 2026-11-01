@@ -401,9 +401,18 @@ def apply(
     ctx: typer.Context,
     task_id: str = typer.Argument(...),
     strategy: str = typer.Option("patch", "--strategy", help="patch|merge|copy"),
+    force_copy: bool = typer.Option(
+        False, "--force-copy", help="Required to use the destructive copy strategy."
+    ),
 ) -> None:
     """Apply isolated worktree changes to the primary workspace."""
 
+    if strategy == "copy" and not force_copy:
+        typer.echo("copy strategy is destructive; pass --force-copy to confirm", err=True)
+        raise typer.Exit(code=2)
+    if strategy not in {"patch", "merge", "copy"}:
+        typer.echo(f"unsupported strategy: {strategy}", err=True)
+        raise typer.Exit(code=2)
     runtime = _runtime(ctx)
     try:
         payload = runtime.router.apply_task_patch(task_id, strategy=strategy)

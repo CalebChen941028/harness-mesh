@@ -2018,6 +2018,11 @@ class MeshRouter:
 
     def apply_task_patch(self, task_id: str, strategy: str = "patch") -> dict[str, Any]:
         record = self.storage.get_task(task_id)
+        if record.get("status") != TaskStatus.COMPLETED:
+            raise WorkspaceError(
+                f"task {task_id} is not completed (status={record.get('status')}); "
+                "only completed tickets can be applied"
+            )
         request = record.get("request")
         if request is not None and request.workspace_mode == WorkspaceMode.READ_ONLY:
             raise WorkspaceError(
