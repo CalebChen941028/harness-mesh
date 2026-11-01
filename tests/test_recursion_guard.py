@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from harness_mesh.models import TaskRequest, TaskStatus
+from harness_mesh.router import NO_HARNESS_MESSAGE
 from tests.helpers import FakeAdapter, make_mesh, success, write_claude_settings, write_codex_config
 
 
@@ -56,7 +57,12 @@ async def test_cycle_and_depth_are_rejected_before_any_worktree_is_created(tmp_p
             )
         )
         assert not_rejected.status == TaskStatus.FAILED
-        assert "no_available_model" in (not_rejected.error_detail or "")
+        # No adapter is registered in this fixture, so the new "nothing is
+        # installed" message replaces the generic no_available_model detail.
+        assert (not_rejected.error_detail or "") in {
+            "no_available_model",
+            NO_HARNESS_MESSAGE,
+        }
     finally:
         mesh.storage.close()
 

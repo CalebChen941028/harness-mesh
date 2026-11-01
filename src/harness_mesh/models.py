@@ -321,6 +321,7 @@ class TaskResult(_Model):
 class HarnessStatus(_Model):
     harness: str = ""
     available: bool = False
+    installed: bool = True
     mode: str = "cli"
     binary_path: str | None = None
     version_or_detail: str = ""

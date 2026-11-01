@@ -39,14 +39,16 @@ _ACCOUNT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"payment required", re.I), "payment_required"),
     (re.compile(r"\b402\b"), "http_402_payment_required"),
     (re.compile(r"account (?:is )?out of credits?", re.I), "insufficient_credits"),
+    # ``usage limit`` / ``insufficient_quota`` describe the account's plan
+    # budget, not one model: every model on the harness is affected.
+    (re.compile(r"usage[_ ]limit", re.I), "usage_limit"),
+    (re.compile(r"insufficient[_ ]quota", re.I), "insufficient_quota"),
 ]
 
 _MODEL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b429\b"), "rate_limit_429"),
     (re.compile(r"too many requests", re.I), "rate_limit_429"),
     (re.compile(r"rate[ _-]?limit", re.I), "rate_limit_exceeded"),
-    (re.compile(r"usage limit", re.I), "usage_limit"),
-    (re.compile(r"insufficient[_ ]quota", re.I), "insufficient_quota"),
     (re.compile(r"resource[ _]?exhausted", re.I), "resource_exhausted"),
     (re.compile(r"quota[ _-]?exceeded", re.I), "quota_exceeded"),
     (re.compile(r"overloaded(?:[_ ]error)?", re.I), "overloaded_error"),

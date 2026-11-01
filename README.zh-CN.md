@@ -247,6 +247,8 @@ Epoch AI 数据采用 CC BY 4.0，需要署名。`hmesh market show` 末尾固�
 
 控制端只发目标，不必点名模型。MCP 的 `dispatch_task` 与 `hmesh dispatch` 都把 `target_harness` 默认成 `auto`，由 Mesh 在所有已安装的 Harness 之间路由并选模型。MCP 的 `initialize` 响应会把这条规则告诉每个客户端。显式传入 `model` 或 `target_harness` 时行为不变。
 
+机器上只装五家中的一两家时，`hmesh status`、`hmesh models` 与 `list_harnesses` 把未安装的 Harness 标成 `not installed` 并给出原因，模型与分档留空；`hmesh doctor` 末尾汇总 `N of 5 harnesses installed`。`hmesh install --dry-run` 对缺少二进制的 Harness 返回 `skipped`；ZCode 既没有 CLI 也没有应用时返回 `ZCode not found`，不写插件文件。
+
 市场分数同时驱动模型发现：Harness 模型匹配到目录后，`capability_score`、`assigned_tiers` 与分档映射改用市场智能分，没有匹配时保持原启发式。`hmesh models`、`hmesh status` 与 `list_harnesses` 会显示每个模型的 `intelligence`、`intelligence_source` 与混合价格，因此用户看到的分档、派发选中的模型和路由预览保持一致。`hmesh doctor` 增加只读的 `market` 一行：数据来源、最近一次成功刷新、是否过期、匹配率与未匹配模型。
 
 ### 任务类型与档位

@@ -384,6 +384,15 @@ def doctor(
                     f"(level {approvals.get('level')}); missing: {missing}"
                 )
         _echo_market_doctor(market_report)
+        installed = installer.installed_harnesses()
+        total = len(
+            [
+                name
+                for name in ("claude_code", "codex", "deepseek", "antigravity", "zcode")
+                if name in config.harnesses
+            ]
+        )
+        typer.echo(f"{len(installed)} of {total} harnesses installed")
     if any(result.status == "failed" for result in results):
         raise typer.Exit(code=1)
 
@@ -407,6 +416,11 @@ def status(
         typer.echo(_json(payload))
         return
     for item in statuses:
+        if not item.installed:
+            typer.echo(
+                f"{item.harness:14} not installed  {item.version_or_detail or 'binary not found'}"
+            )
+            continue
         state = "available" if item.available else "missing"
         models = ", ".join(item.authorized_models) or "(none discovered)"
         typer.echo(f"{item.harness:14} {state:10} quota={item.quota_state:9} mode={item.mode}")
@@ -450,6 +464,10 @@ def models(
         entries = payload
     for name, item in entries.items():
         typer.echo(f"[{name}]")
+        if item.get("installed") is False:
+            reason = item.get("reason") or item.get("error") or "binary not found"
+            typer.echo(f"  not installed ({reason})")
+            continue
         if item.get("error"):
             typer.echo(f"  error: {item['error']}")
         for model in item.get("models", []):

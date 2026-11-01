@@ -1285,10 +1285,15 @@ def test_cli_status_models_quota_and_skills_commands(tmp_path):
     write_claude_settings(home, model="claude-opus-9")
     init_git_repo(workspace, {"README.md": "cli fixture\n"})
     config_path = Path(__file__).resolve().parents[1] / "config" / "harnesses.example.yaml"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_claude = bin_dir / "claude"
+    fake_claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_claude.chmod(0o755)
     env = {
         "HOME": str(home),
         "DSH_HOME": str(home / ".dsh"),
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
         "HARNESS_MESH_DISABLE_SYSTEM_BINARIES": "1",
     }
     runner = CliRunner()

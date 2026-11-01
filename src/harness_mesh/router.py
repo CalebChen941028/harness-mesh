@@ -56,6 +56,11 @@ from .workspace import Changes, WorkspaceError, WorkspaceManager
 
 logger = logging.getLogger(__name__)
 
+NO_HARNESS_MESSAGE = (
+    "No supported harness found. Install one of: Claude Code, Codex, "
+    "DeepSeek Harness, Antigravity, ZCode, then run hmesh install."
+)
+
 
 @dataclass
 class MeshRuntime:
@@ -241,6 +246,9 @@ class MeshRouter:
                     started,
                 )
         trace_chain = list(request.trace_chain)
+        initial_harness = (
+            target if target != "auto" else (self._first_runnable_harness() or "auto")
+        )
 
         rejection = self._check_recursion(target, request, trace_chain)
         if rejection is not None:
@@ -327,7 +335,7 @@ class MeshRouter:
         self.storage.create_task(
             request,
             status=TaskStatus.RUNNING,
-            initial_harness=target if target != "auto" else None,
+            initial_harness=initial_harness if initial_harness != "auto" else None,
             worktree_path=worktree_path,
             worktree_branch=worktree_branch,
             checkpoint=request.checkpoint,
@@ -390,11 +398,58 @@ class MeshRouter:
                 request, root, target, difficulty, workdir
             )
         if selection is None:
+            installed = [
+                harness
+                for harness in self.config.ordered_candidates()
+                if harness in self.config.harnesses
+                and self.config.harnesses[harness].enabled
+                and self._adapter_runnable(harness)
+            ]
+            if not installed:
+                return self._terminal_result(
+                    request,
+                    status=TaskStatus.FAILED,
+                    initial_harness=initial_harness,
+                    current_harness=initial_harness,
+                    current_model=request.model or "",
+                    difficulty=difficulty,
+                    effort=effort,
+                    summary=NO_HARNESS_MESSAGE,
+                    error_detail=NO_HARNESS_MESSAGE,
+                    workdir=workdir,
+                    worktree_path=worktree_path,
+                    worktree_branch=worktree_branch,
+                    started=started,
+                    skills=[s.name for s in skills_selected],
+                    plugins=list(active_plugin_names),
+                )
+            blocked = await self._quota_blocked_pair(request, root, target)
+            if blocked is not None and self.config.suspend_when_no_candidate:
+                return self._waiting_result(
+                    request,
+                    initial_harness,
+                    blocked[0],
+                    blocked[1],
+                    difficulty,
+                    effort,
+                    workdir,
+                    worktree_path,
+                    worktree_branch,
+                    started,
+                    skills_selected,
+                    active_plugin_names,
+                    AdapterOutcome(exit_code=0, stdout="", stderr=""),
+                    [],
+                    None,
+                    mode,
+                    ws,
+                    "quota_exhausted_all_candidates",
+                )
             return self._terminal_result(
                 request,
                 status=TaskStatus.FAILED,
-                initial_harness=target,
-                current_harness=target,
+                initial_harness=initial_harness,
+                current_harness=initial_harness,
                 current_model=request.model or "",
                 difficulty=difficulty,
                 effort=effort,
@@ -422,7 +477,7 @@ class MeshRouter:
             target = current_harness
         self.storage.update_task(
             request.task_id,
-            initial_harness=target,
+            initial_harness=initial_harness,
             current_harness=current_harness,
             current_model=current_model,
             resolved_difficulty=difficulty.value,
@@ -599,7 +654,7 @@ class MeshRouter:
                         return self._terminal_result(
                             request,
                             status=TaskStatus.FAILED,
-                            initial_harness=target,
+                            initial_harness=initial_harness,
                             current_harness=current_harness,
                             current_model=current_model,
                             difficulty=difficulty,
@@ -650,7 +705,7 @@ class MeshRouter:
                     return self._terminal_result(
                         request,
                         status=TaskStatus.TIMEOUT,
-                        initial_harness=target,
+                        initial_harness=initial_harness,
                         current_harness=current_harness,
                         current_model=current_model,
                         difficulty=difficulty,
@@ -728,7 +783,7 @@ class MeshRouter:
                         return self._terminal_result(
                             request,
                             status=TaskStatus.FAILED,
-                            initial_harness=target,
+                            initial_harness=initial_harness,
                             current_harness=current_harness,
                             current_model=current_model,
                             difficulty=difficulty,
@@ -798,7 +853,7 @@ class MeshRouter:
                         return self._terminal_result(
                             request,
                             status=TaskStatus.FAILED,
-                            initial_harness=target,
+                            initial_harness=initial_harness,
                             current_harness=current_harness,
                             current_model=current_model,
                             difficulty=difficulty,
@@ -884,7 +939,7 @@ class MeshRouter:
                     return self._terminal_result(
                         request,
                         status=TaskStatus.FAILED,
-                        initial_harness=target,
+                        initial_harness=initial_harness,
                         current_harness=current_harness,
                         current_model=current_model,
                         difficulty=difficulty,
@@ -950,7 +1005,7 @@ class MeshRouter:
                     return self._terminal_result(
                         request,
                         status=TaskStatus.FAILED,
-                        initial_harness=target,
+                        initial_harness=initial_harness,
                         current_harness=current_harness,
                         current_model=current_model,
                         difficulty=difficulty,
@@ -1000,7 +1055,7 @@ class MeshRouter:
             return self._terminal_result(
                 request,
                 status=TaskStatus.FAILED,
-                initial_harness=target,
+                initial_harness=initial_harness,
                 current_harness=current_harness,
                 current_model=current_model,
                 difficulty=difficulty,
@@ -1046,7 +1101,7 @@ class MeshRouter:
         result = self._build_result(
             request,
             status=TaskStatus.COMPLETED,
-            initial_harness=target,
+            initial_harness=initial_harness,
             current_harness=current_harness,
             current_model=current_model,
             difficulty=difficulty,
@@ -1279,6 +1334,16 @@ class MeshRouter:
             return False
         return True
 
+    def _first_runnable_harness(self) -> str:
+        for harness in self.config.ordered_candidates():
+            if harness not in self.config.harnesses:
+                continue
+            if not self.config.harnesses[harness].enabled:
+                continue
+            if self._adapter_runnable(harness):
+                return harness
+        return ""
+
     async def _collect_targets_and_models(
         self, request: TaskRequest, root: Path, target: str
     ) -> tuple[list[str], list[DiscoveredModel]]:
@@ -1362,6 +1427,25 @@ class MeshRouter:
             available=self.guardian.is_available,
             preferred_effort=request.reasoning_effort,
         )
+
+    async def _quota_blocked_pair(
+        self, request: TaskRequest, root: Path, target: str
+    ) -> tuple[str, str] | None:
+        """Return a blocked harness/model when every candidate is quota-open."""
+
+        _ordered, models = await self._collect_targets_and_models(request, root, target)
+        if target != "auto":
+            models = [model for model in models if model.harness == target]
+        if not models:
+            return None
+        blocked = [
+            model
+            for model in models
+            if not self.guardian.is_available(model.harness, model.model_id)
+        ]
+        if len(blocked) != len(models):
+            return None
+        return blocked[0].harness, blocked[0].model_id
 
     async def _ensure_market_before_dispatch(self) -> None:
         """Wait at most ``market.wait_seconds`` for the first market snapshot."""
@@ -2346,13 +2430,19 @@ class MeshRouter:
                         mode="custom",
                         version_or_detail="custom adapter",
                     )
-            try:
-                models = await self.discovery.discover_for_harness(
-                    harness, workspace_root=self.workspace_root, force_refresh=refresh_models
-                )
-            except Exception:
-                models = self.storage.list_discovered_models(harness)
-            models = self._apply_market_scores(models)
+            if not status.available and status.mode == "missing":
+                # An uninstalled harness must not show the example config's
+                # models or tiers: nothing was discovered on this machine.
+                status.installed = False
+                models = []
+            else:
+                try:
+                    models = await self.discovery.discover_for_harness(
+                        harness, workspace_root=self.workspace_root, force_refresh=refresh_models
+                    )
+                except Exception:
+                    models = self.storage.list_discovered_models(harness)
+                models = self._apply_market_scores(models)
             authorized = [model.model_id for model in models if model.authorized]
             tier_models = self._tier_models_from_models(models)
             status.authorized_models = authorized
@@ -2418,7 +2508,22 @@ class MeshRouter:
 
     async def _discover_payload(self, harness: str, force_refresh: bool) -> dict[str, Any]:
         if harness not in self.config.harnesses:
-            return {"harness": harness, "error": "unknown harness", "models": [], "tier_models": {}}
+            return {
+                "harness": harness,
+                "error": "unknown harness",
+                "installed": False,
+                "models": [],
+                "tier_models": {},
+            }
+        if not self._adapter_runnable(harness):
+            return {
+                "harness": harness,
+                "installed": False,
+                "reason": "not installed",
+                "models": [],
+                "tier_models": {},
+                "authorized_models": [],
+            }
         try:
             models = await self.discovery.discover_for_harness(
                 harness, workspace_root=self.workspace_root, force_refresh=force_refresh
@@ -2430,12 +2535,14 @@ class MeshRouter:
             return {
                 "harness": harness,
                 "error": str(exc),
+                "installed": True,
                 "models": [model.model_dump(mode="json") for model in models],
                 "tier_models": self._tier_models_from_models(models),
             }
         models = self._apply_market_scores(models)
         return {
             "harness": harness,
+            "installed": True,
             "models": [model.model_dump(mode="json") for model in models],
             "tier_models": self._tier_models_from_models(models),
             "authorized_models": [model.model_id for model in models if model.authorized],

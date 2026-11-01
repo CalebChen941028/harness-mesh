@@ -301,7 +301,9 @@ def test_one_shot_cli_commands_are_bounded_by_the_configured_timeout(tmp_path, m
 
 @pytest.mark.asyncio
 async def test_list_harnesses_uses_market_scores_for_tiers(tmp_path):
-    mesh = make_mesh(tmp_path)
+    mesh = make_mesh(
+        tmp_path, adapters={"claude_code": FakeAdapter("claude_code", lambda a, c: success())}
+    )
     mesh.storage.save_market_snapshot(
         "epoch",
         time.time(),
@@ -334,7 +336,8 @@ async def test_list_harnesses_uses_market_scores_for_tiers(tmp_path):
 
 
 def test_models_and_status_show_market_scores(tmp_path, monkeypatch):
-    mesh = make_mesh(tmp_path)
+    adapters = {"claude_code": FakeAdapter("claude_code", lambda a, c: success())}
+    mesh = make_mesh(tmp_path, adapters=adapters)
     mesh.storage.save_market_snapshot(
         "epoch",
         time.time(),
@@ -348,7 +351,7 @@ def test_models_and_status_show_market_scores(tmp_path, monkeypatch):
     mesh.storage.save_discovered_models([_discovered("claude_code", "high", score=10.0)])
 
     def factory():
-        runtime = make_mesh(tmp_path)
+        runtime = make_mesh(tmp_path, adapters=adapters)
         return runtime
 
     monkeypatch.setattr(cli_module, "_runtime", lambda ctx: factory())

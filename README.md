@@ -256,6 +256,8 @@ The cache stays current without a manual step. The MCP server refreshes in the b
 
 The controller sends an objective, nothing else. `dispatch_task` over MCP and `hmesh dispatch` default `target_harness` to `auto`, so the mesh routes across every installed harness and picks the model. The MCP `initialize` response states the same rule to every client. Passing `model` or `target_harness` explicitly keeps the previous behaviour.
 
+On a machine with only some of the five harnesses, `hmesh status`, `hmesh models` and `list_harnesses` report a missing harness as `not installed` with the reason and leave its models and tier map empty; `hmesh doctor` ends with `N of 5 harnesses installed`. `hmesh install --dry-run` returns `skipped` for a missing binary, and ZCode is skipped as `ZCode not found` without writing a plugin when neither its CLI nor its app is present.
+
 The market score also drives discovery: when a harness model matches the catalogue, its `capability_score`, `assigned_tiers` and tier map come from the market intelligence instead of the local heuristic. `hmesh models`, `hmesh status` and `list_harnesses` show each model's `intelligence`, `intelligence_source` and blended price, so the tier a user reads, the model dispatch picks and the route preview agree. `hmesh doctor` adds a read-only `market` row with the sources, the last successful refresh, staleness, the match rate and the unmatched models.
 
 ### Task kinds and tiers
