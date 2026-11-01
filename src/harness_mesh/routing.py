@@ -31,6 +31,17 @@ _TIER_EFFORT = {
 }
 _PREMIUM_KINDS = {TaskKind.PLAN.value, TaskKind.AUDIT.value, TaskKind.REVIEW.value}
 _BALANCED_KINDS = {TaskKind.REFACTOR.value, TaskKind.DEBUG.value}
+_DEFAULT_AXIS_WEIGHTS: dict[str, dict[str, float]] = {
+    "plan": {"reasoning": 0.7, "coding": 0.3},
+    "audit": {"reasoning": 0.7, "coding": 0.3},
+    "review": {"reasoning": 0.7, "coding": 0.3},
+    "implement": {"reasoning": 0.3, "coding": 0.7},
+    "refactor": {"reasoning": 0.3, "coding": 0.7},
+    "debug": {"reasoning": 0.3, "coding": 0.7},
+    "test": {"reasoning": 0.3, "coding": 0.7},
+    "docs": {"reasoning": 1.0, "coding": 0.0},
+}
+_BALANCED_AXIS_WEIGHTS = {"reasoning": 0.5, "coding": 0.5}
 
 _KIND_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
@@ -138,6 +149,10 @@ class RouteCandidate(BaseModel):
     effort_variant: str | None = None
     intelligence: float
     intelligence_source: str = "heuristic"
+    intelligence_reasoning: float | None = None
+    intelligence_coding: float | None = None
+    benchmarks_used: list[str] = Field(default_factory=list)
+    benchmark_data_date: str | None = None
     market_key: str | None = None
     confidence: str = "none"
     input_per_mtok: float | None = None
@@ -152,6 +167,8 @@ class RoutingChoice(BaseModel):
     effort: str | None = None
     intelligence: float | None = None
     intelligence_source: str | None = None
+    intelligence_reasoning: float | None = None
+    intelligence_coding: float | None = None
     input_per_mtok: float | None = None
     output_per_mtok: float | None = None
     blended_price: float | None = None
@@ -186,6 +203,8 @@ class RoutingDecision(BaseModel):
     chosen: RoutingChoice | None = None
     alternatives: list[RoutingAlternative] = Field(default_factory=list)
     reasons: list[str] = Field(default_factory=list)
+    axis_scores: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    benchmarks_used: list[str] = Field(default_factory=list)
     data: RoutingData = Field(default_factory=RoutingData)
 
 
@@ -298,6 +317,10 @@ def build_candidates(
                 effort_variant=chosen_effort,
                 intelligence=round(float(intelligence), 2),
                 intelligence_source=source,
+                intelligence_reasoning=market.intelligence_reasoning if market else None,
+                intelligence_coding=market.intelligence_coding if market else None,
+                benchmarks_used=list(market.benchmarks_used) if market else [],
+                benchmark_data_date=market.benchmark_data_date if market else None,
                 market_key=found.key,
                 confidence=found.confidence,
                 input_per_mtok=market.input_per_mtok if market else None,
@@ -330,12 +353,22 @@ class RoutePlanner:
         value_hints: Sequence[str] = (),
         strict_hints: bool = False,
         pins: Mapping[str, Any] | None = None,
+        axis_weights: Mapping[str, Mapping[str, float]] | None = None,
     ):
         self.floors = {"low": 0.55, "medium": 0.70, **(dict(floors or {}))}
         self.premium_hints = [str(item) for item in premium_hints if str(item)]
         self.value_hints = [str(item) for item in value_hints if str(item)]
         self.strict_hints = bool(strict_hints)
         self.pins = dict(pins or {})
+        self.axis_weights: dict[str, dict[str, float]] = {
+            kind: dict(values) for kind, values in _DEFAULT_AXIS_WEIGHTS.items()
+        }
+        for kind, values in (axis_weights or {}).items():
+            merged = dict(self.axis_weights.get(str(kind), _BALANCED_AXIS_WEIGHTS))
+            for axis in ("reasoning", "coding"):
+                if axis in values:
+                    merged[axis] = float(values[axis])
+            self.axis_weights[str(kind)] = merged
 
     @classmethod
     def from_config(cls, config: RoutingConfig | None) -> "RoutePlanner":
@@ -347,7 +380,47 @@ class RoutePlanner:
             value_hints=config.value_hints,
             strict_hints=config.strict_hints,
             pins=config.pins,
+            axis_weights=config.axis_weights,
         )
+
+    def weights_for(self, task_kind: TaskKind | str) -> dict[str, float]:
+        kind = task_kind.value if isinstance(task_kind, TaskKind) else str(task_kind)
+        return dict(self.axis_weights.get(kind, _BALANCED_AXIS_WEIGHTS))
+
+    @staticmethod
+    def task_intelligence(
+        candidate: RouteCandidate, weights: Mapping[str, float]
+    ) -> float | None:
+        """Weighted mean over the axes the model actually has scores for.
+
+        When one axis is missing, the other axis supplies full weight.  A
+        model without any benchmark score keeps its existing (heuristic)
+        intelligence.
+        """
+
+        available = {
+            axis: score
+            for axis, score in (
+                ("reasoning", candidate.intelligence_reasoning),
+                ("coding", candidate.intelligence_coding),
+            )
+            if score is not None
+        }
+        if not available:
+            return None
+        total = sum(float(weights.get(axis, 0.0)) for axis in available)
+        if total <= 0:
+            total = float(len(available))
+            return sum(score for score in available.values()) / total
+        return sum(score * float(weights.get(axis, 0.0)) for axis, score in available.items()) / total
+
+    def _with_task_intelligence(
+        self, candidate: RouteCandidate, weights: Mapping[str, float]
+    ) -> RouteCandidate:
+        score = self.task_intelligence(candidate, weights)
+        if score is None:
+            return candidate
+        return candidate.model_copy(update={"intelligence": round(float(score), 2)})
 
     def _pin_for(self, task_kind: str) -> tuple[str, str, str | None] | None:
         pin = self.pins.get(task_kind)
@@ -383,7 +456,10 @@ class RoutePlanner:
             expired=bool(catalog.expired) if catalog else False,
         )
 
-        pool = [candidate for candidate in candidates]
+        weights = self.weights_for(kind)
+        pool = [
+            self._with_task_intelligence(candidate, weights) for candidate in candidates
+        ]
         filtered = [candidate for candidate in pool if self._passes(candidate, max_price_per_mtok, min_intelligence)]
         if len(filtered) != len(pool):
             reasons.append(
@@ -568,18 +644,34 @@ class RoutePlanner:
         effort: str | None = None,
     ) -> RoutingDecision:
         best, best_score = ranked[0]
+        weights = self.weights_for(task_kind)
         chosen = RoutingChoice(
             harness=best.harness,
             model=best.model,
             effort=effort if effort is not None else best.effort_variant,
             intelligence=best.intelligence,
             intelligence_source=best.intelligence_source,
+            intelligence_reasoning=best.intelligence_reasoning,
+            intelligence_coding=best.intelligence_coding,
             input_per_mtok=best.input_per_mtok,
             output_per_mtok=best.output_per_mtok,
             blended_price=best.blended_price,
             market_key=best.market_key,
             confidence=best.confidence,
         )
+        if best.intelligence_reasoning is not None or best.intelligence_coding is not None:
+            reasons.append(
+                "reasoning axis {}, coding axis {}, task weights {:g}/{:g}".format(
+                    best.intelligence_reasoning
+                    if best.intelligence_reasoning is not None
+                    else "unknown",
+                    best.intelligence_coding
+                    if best.intelligence_coding is not None
+                    else "unknown",
+                    weights["reasoning"],
+                    weights["coding"],
+                )
+            )
         reasons.append(
             f"selected {best.harness}/{best.model} (score {best_score:g}, "
             f"intelligence {best.intelligence:g} from {best.intelligence_source}, "
@@ -611,6 +703,17 @@ class RoutePlanner:
             chosen=chosen,
             alternatives=alternatives,
             reasons=reasons,
+            axis_scores={
+                "reasoning": {
+                    "score": best.intelligence_reasoning,
+                    "weight": weights["reasoning"],
+                },
+                "coding": {
+                    "score": best.intelligence_coding,
+                    "weight": weights["coding"],
+                },
+            },
+            benchmarks_used=list(best.benchmarks_used),
             data=data.model_copy(
                 update={
                     "confidence": best.confidence,

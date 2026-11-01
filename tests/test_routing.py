@@ -281,13 +281,25 @@ def test_decision_contains_no_secret_and_has_every_documented_field():
         catalog=catalog,
     )
     payload = decision.model_dump(mode="json")
-    assert set(payload) == {"mode", "task_kind", "tier", "chosen", "alternatives", "reasons", "data"}
+    assert set(payload) == {
+        "mode",
+        "task_kind",
+        "tier",
+        "chosen",
+        "alternatives",
+        "reasons",
+        "axis_scores",
+        "benchmarks_used",
+        "data",
+    }
     assert set(payload["chosen"]) == {
         "harness",
         "model",
         "effort",
         "intelligence",
         "intelligence_source",
+        "intelligence_reasoning",
+        "intelligence_coding",
         "input_per_mtok",
         "output_per_mtok",
         "blended_price",

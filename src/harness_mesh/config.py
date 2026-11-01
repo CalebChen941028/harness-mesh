@@ -252,6 +252,23 @@ class RoutingPinConfig(BaseModel):
     effort: str | None = None
 
 
+def _default_axis_weights() -> dict[str, dict[str, float]]:
+    """Per-task weights over the Epoch reasoning and coding axes."""
+
+    reasoning = {"reasoning": 0.7, "coding": 0.3}
+    coding = {"reasoning": 0.3, "coding": 0.7}
+    return {
+        "plan": dict(reasoning),
+        "audit": dict(reasoning),
+        "review": dict(reasoning),
+        "implement": dict(coding),
+        "refactor": dict(coding),
+        "debug": dict(coding),
+        "test": dict(coding),
+        "docs": {"reasoning": 1.0, "coding": 0.0},
+    }
+
+
 class RoutingConfig(BaseModel):
     """Task-kind tiers, value floors and optional model preference hints."""
 
@@ -259,6 +276,9 @@ class RoutingConfig(BaseModel):
 
     mode: str = "auto"
     floors: dict[str, float] = Field(default_factory=lambda: {"low": 0.55, "medium": 0.70})
+    # Which evaluation axis matters for a task kind. A missing axis falls back
+    # to the other axis at full weight.
+    axis_weights: dict[str, dict[str, float]] = Field(default_factory=_default_axis_weights)
     premium_hints: list[str] = Field(default_factory=list)
     value_hints: list[str] = Field(default_factory=list)
     strict_hints: bool = False

@@ -135,6 +135,18 @@ routing:
   floors:
     low: 0.55
     medium: 0.70
+  # Which Epoch AI axis a task kind is scored on. Plan, audit and review are
+  # mostly reasoning work; implementation and debugging are mostly coding
+  # work. A model missing one axis is scored on the axis it has.
+  axis_weights:
+    plan:       {reasoning: 0.7, coding: 0.3}
+    audit:      {reasoning: 0.7, coding: 0.3}
+    review:     {reasoning: 0.7, coding: 0.3}
+    implement:  {reasoning: 0.3, coding: 0.7}
+    refactor:   {reasoning: 0.3, coding: 0.7}
+    debug:      {reasoning: 0.3, coding: 0.7}
+    test:       {reasoning: 0.3, coding: 0.7}
+    docs:       {reasoning: 1.0, coding: 0.0}
   premium_hints:
     - claude-opus*
     - claude-sonnet*
