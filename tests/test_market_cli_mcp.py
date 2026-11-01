@@ -430,6 +430,39 @@ async def test_mcp_dispatch_accepts_kind_and_routing_mode(tmp_path):
         mesh.storage.close()
 
 
+@pytest.mark.asyncio
+async def test_mcp_parallel_dispatch_accepts_routing_fields(tmp_path):
+    adapter = FakeAdapter("claude_code", lambda adapter, call: success("parallel done"))
+    mesh = make_mesh(tmp_path, adapters={"claude_code": adapter})
+    _seed_market(mesh, [_model("anthropic/claude-opus-5-5", intelligence=88.0)])
+    _seed_models(mesh, [_discovered("claude_code", "claude-opus-5-5")])
+    try:
+        server = create_server(mesh.router)
+        payload = _tool_payload(
+            await server.call_tool(
+                "parallel_dispatch",
+                {
+                    "tasks": [
+                        {
+                            "objective": "Implement the flag",
+                            "target_harness": "claude_code",
+                            "difficulty": "medium",
+                            "task_kind": "implement",
+                            "routing_mode": "off",
+                            "workspace_root": str(mesh.workspace_root),
+                        }
+                    ]
+                },
+            )
+        )
+        result = payload["results"][0]
+        assert result["status"] == TaskStatus.COMPLETED.value
+        assert result["routing"]["mode"] == "off"
+        assert result["routing"]["task_kind"] == "implement"
+    finally:
+        mesh.storage.close()
+
+
 # ---------------------------------------------------------------------------
 # background refresh
 # ---------------------------------------------------------------------------

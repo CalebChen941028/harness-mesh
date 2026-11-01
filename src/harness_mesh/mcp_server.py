@@ -247,7 +247,12 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
     async def parallel_dispatch(
         tasks: list[dict[str, Any]], max_concurrency: int = 8
     ) -> dict[str, Any]:
-        """Dispatch multiple tickets concurrently across different harnesses."""
+        """Dispatch multiple tickets concurrently.
+
+        Every task accepts the same fields as ``dispatch_task``, including
+        ``task_kind``, ``routing_mode``, ``max_price_per_mtok`` and
+        ``min_intelligence``.
+        """
 
         parent_task_id = os.environ.get("HARNESS_MESH_TASK_ID")
         inherited_depth, inherited_trace = _inherited_lineage(router)
