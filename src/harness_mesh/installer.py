@@ -605,16 +605,25 @@ class HarnessInstaller:
                 continue
             path.parent.mkdir(parents=True, exist_ok=True)
             backup = path.with_suffix(path.suffix + ".harness-mesh.bak")
-            original = path.read_text(encoding="utf-8") if path.exists() else ""
-            if path.exists() and not backup.exists():
+            existed = path.exists()
+            original = path.read_text(encoding="utf-8") if existed else ""
+            if existed and not backup.exists():
                 backup.write_text(original, encoding="utf-8")
             try:
                 content = _dsh_patch_content(path, entry)
-                _atomic_write_text(path, content)
-                _validate_dsh_patch(content)
             except (OSError, ValueError, yaml.YAMLError) as exc:
-                if backup.exists():
-                    _atomic_write_text(path, backup.read_text(encoding="utf-8"))
+                failure = f"failed to prepare {path}: {exc}"
+                break
+            try:
+                _validate_dsh_patch(content)
+            except (ValueError, yaml.YAMLError) as exc:
+                failure = f"failed to validate {path}: {exc}"
+                break
+            try:
+                _atomic_write_text(path, content)
+            except OSError as exc:
+                if existed:
+                    _atomic_write_text(path, original)
                 elif path.exists():
                     path.unlink()
                 failure = f"failed to update {path}: {exc}"
