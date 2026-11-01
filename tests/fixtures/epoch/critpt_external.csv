@@ -1,0 +1,79 @@
+Model version,Accuracy,Release date,Organization
+gpt-6-astra_max,0.317142857142857,2026-09-03,OpenAI
+claude-opus-5-5_max,0.317142857142857,2026-09-22,Anthropic
+claude-opus-5-5_xhigh,0.317142857142857,2026-09-22,Anthropic
+gpt-6.1-sol_max,0.317142857142857,2026-09-29,OpenAI
+gpt-6.1-sol_xhigh,0.317142857142857,2026-09-29,OpenAI
+gpt-6-astra_xhigh,0.314285714285714,2026-09-03,OpenAI
+claude-sonnet-5-5_max,0.314285714285714,2026-09-28,Anthropic
+claude-sonnet-5-5_xhigh,0.311428571428571,2026-09-28,Anthropic
+gpt-6-sol_max,0.308571428571429,2026-09-22,OpenAI
+claude-opus-5-5_high,0.308571428571429,2026-09-22,Anthropic
+gpt-5.5-pro_xhigh,0.305714285714286,2026-04-23,OpenAI
+gpt-6.1-sol_high,0.3,2026-09-29,OpenAI
+gpt-6-astra_medium,0.291428571428571,2026-09-03,OpenAI
+gpt-6-astra_high,0.288571428571429,2026-09-03,OpenAI
+gpt-6-sol_xhigh,0.28,2026-09-22,OpenAI
+gpt-6.1-terra_max,0.28,2026-10-26,OpenAI
+gpt-6.1-sol_medium,0.277142857142857,2026-09-29,OpenAI
+claude-opus-5-5_medium,0.277142857142857,2026-09-22,Anthropic
+gpt-5.5_xhigh,0.271428571428571,2026-04-23,OpenAI
+gemini-4-argon_high,0.271428571428571,2026-09-30,Google DeepMind
+gpt-6.1-terra_xhigh,0.265714285714286,2026-10-26,OpenAI
+gpt-6-astra_low,0.262857142857143,2026-09-03,OpenAI
+gpt-6.1-terra_high,0.257142857142857,2026-10-26,OpenAI
+gpt-5.5_high,0.254285714285714,2026-04-23,OpenAI
+gpt-6-sol_high,0.254285714285714,2026-09-22,OpenAI
+gpt-6.1-sol_low,0.248571428571429,2026-09-29,OpenAI
+claude-sonnet-5-5_high,0.245714285714286,2026-09-28,Anthropic
+gpt-6-sol_medium,0.245714285714286,2026-09-22,OpenAI
+deepseek-v4.1-flash-1017_max,0.24,2026-10-17,DeepSeek
+claude-haiku-5-5_xhigh,0.225714285714286,2026-10-07,Anthropic
+gpt-6.1-terra_medium,0.214285714285714,2026-10-26,OpenAI
+glm-5.2_max,0.20857142857142902,2026-06-16,Z.ai (Zhipu AI)
+qwen3.8-max_unknown,0.2,2026-08-02,Alibaba
+gpt-6-astra_none,0.197142857142857,2026-09-03,OpenAI
+gpt-6-luna_max,0.19428571428571403,2026-09-22,OpenAI
+glm-5.3_max,0.191428571428571,2026-08-14,Z.ai (Zhipu AI)
+claude-haiku-5-5_max,0.188571428571429,2026-10-07,Anthropic
+gpt-5.5_medium,0.18571428571428603,2026-04-23,OpenAI
+claude-haiku-5-5_high,0.18571428571428603,2026-10-07,Anthropic
+gemini-3.8-flash_high,0.182857142857143,2026-09-02,Google DeepMind
+deepseek-v4-pro-0813_max,0.18,2026-08-13,DeepSeek
+qwen3.8-max-0902_unknown,0.177142857142857,2026-09-01,Alibaba
+claude-opus-5-5_low,0.177142857142857,2026-09-22,Anthropic
+gpt-6-luna_xhigh,0.174285714285714,2026-09-22,OpenAI
+claude-sonnet-5-5_medium,0.168571428571429,2026-09-28,Anthropic
+gpt-6-sol_low,0.162857142857143,2026-09-22,OpenAI
+gpt-6-luna_high,0.154285714285714,2026-09-22,OpenAI
+gpt-6.1-terra_low,0.151428571428571,2026-10-26,OpenAI
+glm-5.3_low,0.145714285714286,2026-08-14,Z.ai (Zhipu AI)
+deepseek-v4.1-flash_max,0.142857142857143,2026-09-09,DeepSeek
+gemini-3.5-flash_high,0.131428571428571,2026-05-19,Google DeepMind
+deepseek-v4-pro_max,0.128571428571429,2026-04-24,DeepSeek
+claude-haiku-5-5_medium,0.128571428571429,2026-10-07,Anthropic
+gemini-3.8-flash_medium,0.122857142857143,2026-09-02,Google DeepMind
+claude-opus-4-7_max,0.12,2026-04-16,Anthropic
+claude-sonnet-5-5_low,0.114285714285714,2026-09-28,Anthropic
+gpt-6-luna_medium,0.105714285714286,2026-09-22,OpenAI
+deepseek-v4-pro_high,0.1,2026-04-24,DeepSeek
+claude-haiku-5-5_low,0.0914285714285714,2026-10-07,Anthropic
+gpt-5.5_low,0.08,2026-04-23,OpenAI
+gpt-6.1-terra_none,0.0485714285714286,2026-10-26,OpenAI
+gemini-3.8-flash_low,0.04,2026-09-02,Google DeepMind
+gpt-6-sol_none,0.04,2026-09-22,OpenAI
+claude-sonnet-4-6_max,0.0314285714285714,2026-02-17,Anthropic
+glm-5.2_none,0.0314285714285714,2026-06-16,Z.ai (Zhipu AI)
+gpt-6-luna_low,0.0257142857142857,2026-09-22,OpenAI
+gpt-5.5_none,0.0142857142857143,2026-04-23,OpenAI
+gpt-6-luna_none,0.0114285714285714,2026-09-22,OpenAI
+deepseek-v4.1-flash_none,0.00285714285714286,2026-09-09,DeepSeek
+gemini-3.5-flash-lite,0.0,2026-07-21,Google DeepMind
+gpt-5.5-instant,0.0,2026-05-05,OpenAI
+deepseek-v4-pro-0813_none,0.0,2026-08-13,DeepSeek
+kimi-k2.7-code,0.1,2026-06-12,Moonshot
+kimi-k2.6,0.08,2026-04-20,Moonshot
+glm-5.1,0.0457142857142857,2026-04-07,Z.ai (Zhipu AI)
+MiniMax-M3,0.0371428571428571,2026-06-01,MiniMax
+glm-4.7,0.0171020408163265,2025-12-22,Z.ai (Zhipu AI)
+MiniMax-M2.7,0.00571428571428571,2026-03-18,MiniMax

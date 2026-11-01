@@ -46,6 +46,30 @@ class TaskDifficulty(_StrEnum):
     CRITICAL = "critical"
 
 
+class TaskKind(_StrEnum):
+    AUTO = "auto"
+    PLAN = "plan"
+    AUDIT = "audit"
+    REVIEW = "review"
+    IMPLEMENT = "implement"
+    REFACTOR = "refactor"
+    DEBUG = "debug"
+    TEST = "test"
+    DOCS = "docs"
+
+
+class RoutingMode(_StrEnum):
+    AUTO = "auto"
+    MANUAL = "manual"
+    OFF = "off"
+
+
+class RoutingTier(_StrEnum):
+    PREMIUM = "premium"
+    BALANCED = "balanced"
+    VALUE = "value"
+
+
 class QuotaExhaustedPolicy(_StrEnum):
     FAILOVER = "failover"
     WAIT_AND_RESUME = "wait_and_resume"
@@ -84,6 +108,10 @@ class DiscoveredModel(_Model):
     assigned_tiers: list[str] = Field(default_factory=list)
     supports_reasoning: bool = False
     context_window: int | None = None
+    # Market scores overlaid at read time; ``None`` means the local heuristic.
+    intelligence: float | None = None
+    intelligence_source: str | None = None
+    blended_price: float | None = None
     discovered_at: float = Field(default_factory=time.time)
 
     @property
@@ -186,11 +214,16 @@ class QuotaCircuitRecord(_Model):
 
 class TaskRequest(_Model):
     task_id: str = Field(default_factory=lambda: f"task_{uuid.uuid4().hex[:12]}")
-    target_harness: str
+    # ``auto`` lets the mesh pick a runnable harness from every installed one.
+    target_harness: str = "auto"
     objective: str
     difficulty: TaskDifficulty = TaskDifficulty.AUTO
     model: str | None = None
     reasoning_effort: str | None = None
+    task_kind: TaskKind = TaskKind.AUTO
+    routing_mode: RoutingMode = RoutingMode.AUTO
+    max_price_per_mtok: float | None = None
+    min_intelligence: float | None = None
     skills: list[str] = Field(default_factory=list)
     plugins: list[str] = Field(default_factory=list)
     auto_match_skills: bool = False
@@ -224,6 +257,20 @@ class TaskRequest(_Model):
     def _attempts_non_negative(cls, value: int) -> int:
         if value < 0:
             raise ValueError("max_failover_attempts must be >= 0")
+        return value
+
+    @field_validator("max_price_per_mtok")
+    @classmethod
+    def _price_non_negative(cls, value: float | None) -> float | None:
+        if value is not None and value < 0:
+            raise ValueError("max_price_per_mtok must be >= 0")
+        return value
+
+    @field_validator("min_intelligence")
+    @classmethod
+    def _intelligence_in_range(cls, value: float | None) -> float | None:
+        if value is not None and not 0 <= value <= 100:
+            raise ValueError("min_intelligence must be between 0 and 100")
         return value
 
 
@@ -264,6 +311,7 @@ class TaskResult(_Model):
     native_session_id: str | None = None
     duration_ms: int = 0
     error_detail: str | None = None
+    routing: dict[str, Any] | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -273,12 +321,14 @@ class TaskResult(_Model):
 class HarnessStatus(_Model):
     harness: str = ""
     available: bool = False
+    installed: bool = True
     mode: str = "cli"
     binary_path: str | None = None
     version_or_detail: str = ""
     active_default_model: str | None = None
     authorized_models: list[str] = Field(default_factory=list)
     tier_models: dict[str, str] = Field(default_factory=dict)
+    model_details: list[dict[str, Any]] = Field(default_factory=list)
     quota_state: str = "closed"
     circuits: list[QuotaCircuitRecord] = Field(default_factory=list)
 
@@ -306,8 +356,11 @@ __all__ = [
     "PluginSpec",
     "QuotaCircuitRecord",
     "QuotaExhaustedPolicy",
+    "RoutingMode",
+    "RoutingTier",
     "SkillSpec",
     "TaskDifficulty",
+    "TaskKind",
     "TaskRequest",
     "TaskResourcePage",
     "TaskResult",

@@ -170,6 +170,124 @@ def resolve_harness_binary(
     return None
 
 
+class MarketOverrideConfig(BaseModel):
+    """One ``market.overrides`` entry: a glob and the values it replaces."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    intelligence: float | None = None
+    input_per_mtok: float | None = None
+    output_per_mtok: float | None = None
+    cache_read_per_mtok: float | None = None
+    context_window: int | None = None
+    reasoning: bool | None = None
+
+
+class EpochConfig(BaseModel):
+    """Epoch AI benchmark lists and the percentile reference window."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    reasoning_benchmarks: list[str] = Field(
+        default_factory=lambda: [
+            "gpqa_diamond",
+            "hle_external",
+            "arc_agi_2_external",
+            "critpt_external",
+            "otis_mock_aime_2024_2025",
+            "frontiermath_tiers_1_3_v2",
+        ]
+    )
+    coding_benchmarks: list[str] = Field(
+        default_factory=lambda: [
+            "swe_bench_verified",
+            "cursorbench_external",
+            "frontiercode_external",
+            "scicode_external",
+            "terminalbench_external",
+            "ale_bench_external",
+            "webdev_arena_external",
+            "deepswe_external",
+            "frontierswe_external",
+        ]
+    )
+    # Only models released within this many days before a benchmark's latest
+    # release date count towards that benchmark's percentile.
+    reference_window_days: int = 540
+    # An axis with fewer scored benchmarks is left empty instead of padded.
+    min_benchmarks: int = 3
+    ttl_seconds: int = 43_200
+
+
+class MarketConfig(BaseModel):
+    """Settings for the read-only model market and its on-disk snapshot cache."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    enabled: bool = True
+    ttl_seconds: int = 21_600
+    # Upper bound for an automatic refresh before dispatch or a CLI command
+    # continues with the cached (or heuristic) data.
+    wait_seconds: float = 8.0
+    sources: list[str] = Field(
+        default_factory=lambda: ["openrouter", "models_dev", "epoch", "artificial_analysis"]
+    )
+    # Vendors whose own catalogue entry is the authoritative list price.
+    # The default is empty so the list lives in the shipped example config;
+    # without it models.dev prices fall back to the median of every offer.
+    first_party_providers: list[str] = Field(default_factory=list)
+    artificial_analysis_key_env: str = "ARTIFICIAL_ANALYSIS_API_KEY"
+    artificial_analysis_ttl_seconds: int = 43_200
+    artificial_analysis_daily_limit: int = 20
+    stale_after_days: int = 7
+    aliases: dict[str, str] = Field(default_factory=dict)
+    overrides: dict[str, MarketOverrideConfig] = Field(default_factory=dict)
+    epoch: EpochConfig = Field(default_factory=EpochConfig)
+
+
+class RoutingPinConfig(BaseModel):
+    """A fixed ``{harness, model}`` for one task kind."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    harness: str
+    model: str
+    effort: str | None = None
+
+
+def _default_axis_weights() -> dict[str, dict[str, float]]:
+    """Per-task weights over the Epoch reasoning and coding axes."""
+
+    reasoning = {"reasoning": 0.7, "coding": 0.3}
+    coding = {"reasoning": 0.3, "coding": 0.7}
+    return {
+        "plan": dict(reasoning),
+        "audit": dict(reasoning),
+        "review": dict(reasoning),
+        "implement": dict(coding),
+        "refactor": dict(coding),
+        "debug": dict(coding),
+        "test": dict(coding),
+        "docs": {"reasoning": 1.0, "coding": 0.0},
+    }
+
+
+class RoutingConfig(BaseModel):
+    """Task-kind tiers, value floors and optional model preference hints."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    mode: str = "auto"
+    floors: dict[str, float] = Field(default_factory=lambda: {"low": 0.55, "medium": 0.70})
+    # Which evaluation axis matters for a task kind. A missing axis falls back
+    # to the other axis at full weight.
+    axis_weights: dict[str, dict[str, float]] = Field(default_factory=_default_axis_weights)
+    premium_hints: list[str] = Field(default_factory=list)
+    value_hints: list[str] = Field(default_factory=list)
+    strict_hints: bool = False
+    pins: dict[str, RoutingPinConfig] = Field(default_factory=dict)
+
+
 class MeshConfig(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
@@ -210,6 +328,8 @@ class MeshConfig(BaseModel):
     )
     skill_roots: list[str] = Field(default_factory=list)
     plugin_roots: list[str] = Field(default_factory=list)
+    market: MarketConfig = Field(default_factory=MarketConfig)
+    routing: RoutingConfig = Field(default_factory=RoutingConfig)
     harnesses: dict[str, HarnessConfig] = Field(default_factory=dict)
 
     def enabled_harnesses(self) -> list[str]:
@@ -953,8 +1073,13 @@ def config_to_json(config: MeshConfig) -> str:
 
 
 __all__ = [
+    "EpochConfig",
     "HarnessConfig",
+    "MarketConfig",
+    "MarketOverrideConfig",
     "MeshConfig",
+    "RoutingConfig",
+    "RoutingPinConfig",
     "build_handoff_prompt",
     "build_initial_prompt",
     "build_recovery_note",

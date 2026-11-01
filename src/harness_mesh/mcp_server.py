@@ -1,4 +1,4 @@
-"""FastMCP server exposing the thirteen cross-harness orchestration tools."""
+"""FastMCP server exposing the fifteen cross-harness orchestration tools."""
 
 from __future__ import annotations
 
@@ -20,10 +20,12 @@ from .lineage import (
     _task_id_from_cwd,
     _workspace_from_cwd,
 )
+from .market import filter_market_models
 from .models import (
     ContinuationCheckpoint,
     QuotaExhaustedPolicy,
     TaskDifficulty,
+    TaskKind,
     TaskRequest,
     WorkspaceMode,
 )
@@ -34,6 +36,8 @@ from .workspace import WorkspaceError
 TOOL_NAMES = [
     "list_harnesses",
     "discover_harness_models",
+    "get_model_market",
+    "preview_routing",
     "list_skills_and_plugins",
     "dispatch_task",
     "parallel_dispatch",
@@ -46,6 +50,16 @@ TOOL_NAMES = [
     "get_project_context",
     "update_project_context",
 ]
+
+# Sent to every client in the MCP ``initialize`` response.  Fixed text, no
+# user data and no paths: the controller never needs to name a model or a
+# harness, and the mesh owns that decision.
+MESH_INSTRUCTIONS = (
+    "Ask for an outcome. Do not pass model or target_harness: the mesh picks a "
+    "model from the task kind and price/performance. Pass task_kind when you "
+    "know it. Review changes with get_task_status and read_task_resource before "
+    "apply_task_patch."
+)
 
 _runtime: MeshRuntime | None = None
 
@@ -73,7 +87,7 @@ def _error_detail(exc: BaseException) -> str:
 
 
 def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
-    server = FastMCP("harness-mesh")
+    server = FastMCP("harness-mesh", instructions=MESH_INSTRUCTIONS)
     router: MeshRouter = runtime.router if isinstance(runtime, MeshRuntime) else (runtime or get_runtime().router)
 
     @server.tool()
@@ -95,6 +109,48 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
         return payload
 
     @server.tool()
+    def get_model_market(query: str = "", limit: int = 50) -> dict[str, Any]:
+        """Read cached model prices, context windows and intelligence scores.
+
+        ``intelligence_source`` says whether a score came from Artificial
+        Analysis, a user override or the local heuristic.  This tool never
+        refreshes the cache and never performs a network request.
+        """
+
+        catalog = router.market.catalog()
+        models = filter_market_models(catalog.models, query)
+        cap = max(1, min(int(limit), 500))
+        return {
+            "models": [model.model_dump(mode="json") for model in models[:cap]],
+            "matched": len(models),
+            "returned": min(len(models), cap),
+            "sources": list(catalog.sources),
+            "fetched_at": catalog.fetched_at,
+            "stale": catalog.stale,
+            "expired": catalog.expired,
+            "warnings": list(catalog.warnings),
+        }
+
+    @server.tool()
+    async def preview_routing(
+        objective: str,
+        task_kind: str = "auto",
+        difficulty: str = "auto",
+        target_harness: str = "auto",
+    ) -> dict[str, Any]:
+        """Preview the routing decision for an objective without dispatching it."""
+
+        try:
+            return await router.preview_routing(
+                objective,
+                task_kind=task_kind,
+                difficulty=difficulty,
+                target_harness=target_harness,
+            )
+        except (ValueError, TypeError) as exc:
+            return {"error": _error_detail(exc), "objective": objective}
+
+    @server.tool()
     def list_skills_and_plugins(query: str = "") -> dict[str, Any]:
         """Search indexed SKILL.md files and MCP/plugin manifests."""
 
@@ -103,8 +159,12 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
     @server.tool()
     async def dispatch_task(
         objective: str,
-        target_harness: str,
+        target_harness: str = "auto",
         difficulty: str = "auto",
+        task_kind: str = "auto",
+        routing_mode: str | None = None,
+        max_price_per_mtok: float | None = None,
+        min_intelligence: float | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
         skills: list[str] | None = None,
@@ -130,8 +190,10 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
     ) -> dict[str, Any]:
         """Dispatch a ticket.
 
-        Quota exhaustion creates a new Assignment on another harness and resumes
-        in the same worktree.
+        Only the objective is required. Leave target_harness at "auto" and model
+        unset to let the mesh choose; pass task_kind when it is known. Quota
+        exhaustion creates a new Assignment on another harness and resumes in
+        the same worktree.
         """
 
         inherited_depth, inherited_trace = _inherited_lineage(router)
@@ -139,6 +201,7 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
             "target_harness": target_harness,
             "objective": objective,
             "difficulty": TaskDifficulty(difficulty),
+            "task_kind": TaskKind(task_kind),
             "model": model,
             "reasoning_effort": reasoning_effort,
             "skills": list(skills or []),
@@ -160,6 +223,12 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
             "trace_chain": _merge_trace_chain(trace_chain, inherited_trace),
             "checkpoint": ContinuationCheckpoint.model_validate(checkpoint) if checkpoint else None,
         }
+        if routing_mode is not None:
+            request_kwargs["routing_mode"] = routing_mode
+        if max_price_per_mtok is not None:
+            request_kwargs["max_price_per_mtok"] = max_price_per_mtok
+        if min_intelligence is not None:
+            request_kwargs["min_intelligence"] = min_intelligence
         if max_failover_attempts is not None:
             request_kwargs["max_failover_attempts"] = max_failover_attempts
         parent_task_id = os.environ.get("HARNESS_MESH_TASK_ID")
@@ -175,7 +244,13 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
     async def parallel_dispatch(
         tasks: list[dict[str, Any]], max_concurrency: int = 8
     ) -> dict[str, Any]:
-        """Dispatch multiple tickets concurrently across different harnesses."""
+        """Dispatch multiple tickets concurrently.
+
+        Every task accepts the same fields as ``dispatch_task``, including
+        ``task_kind``, ``routing_mode``, ``max_price_per_mtok`` and
+        ``min_intelligence``. ``target_harness`` is optional and defaults to
+        ``auto``.
+        """
 
         parent_task_id = os.environ.get("HARNESS_MESH_TASK_ID")
         inherited_depth, inherited_trace = _inherited_lineage(router)

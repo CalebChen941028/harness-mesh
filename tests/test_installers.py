@@ -173,8 +173,28 @@ def test_uninstall_removes_entries_and_commands(tmp_path):
 
 def test_zcode_without_cli_leaves_marketplace_ready_for_ui(tmp_path):
     installer, home, workspace, calls = _installer(tmp_path)
-    installer.config.harnesses["zcode"].binary = "/does/not/exist/zcode"
+    zcode = installer.config.harnesses["zcode"]
+    zcode.binary = "/does/not/exist/zcode"
+    # The app is detected through these paths; make them exist so the test does
+    # not depend on whether ZCode is installed on the machine running it.
+    fake_app = tmp_path / "ZCode.app"
+    fake_app.mkdir()
+    zcode.extra["macos_electron_bin"] = str(fake_app)
+    zcode.extra["macos_cjs_entry"] = str(fake_app / "zcode.cjs")
     results = installer.install(["zcode"])
     assert results[0].action == "ready"
     assert calls == []
     assert (workspace / ".harness-mesh" / "zcode-plugin" / "marketplace.json").exists()
+
+
+def test_zcode_is_skipped_when_neither_cli_nor_app_exists(tmp_path):
+    installer, home, workspace, calls = _installer(tmp_path)
+    zcode = installer.config.harnesses["zcode"]
+    zcode.binary = "/does/not/exist/zcode"
+    zcode.extra["macos_electron_bin"] = str(tmp_path / "missing" / "ZCode")
+    zcode.extra["macos_cjs_entry"] = str(tmp_path / "missing" / "zcode.cjs")
+    results = installer.install(["zcode"])
+    assert results[0].action == "skipped"
+    assert calls == []
+    assert not (workspace / ".harness-mesh" / "zcode-plugin").exists()
+

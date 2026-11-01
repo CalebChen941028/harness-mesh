@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from harness_mesh.models import AssignmentRecord
@@ -49,7 +50,13 @@ def _add_running_assignment(mesh, task_id: str = "cli-parent") -> AssignmentReco
 def _run_cli_dispatch(
     mesh, config_path: Path, *extra: str
 ) -> tuple[subprocess.CompletedProcess[str], dict]:
-    env = {key: value for key, value in os.environ.items() if not key.startswith("HARNESS_MESH_")}
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        # Keep the suite's offline switch (children cannot inherit the socket
+        # guard); every lineage-related variable is still dropped on purpose.
+        if not key.startswith("HARNESS_MESH_") or key == "HARNESS_MESH_OFFLINE"
+    }
     env["PYTHONPATH"] = str(REPO_ROOT / "src")
     env["HOME"] = str(mesh.home_dir)
     command = [
@@ -89,11 +96,14 @@ def test_cli_dispatch_inherits_ledger_depth_without_any_mesh_environment(tmp_pat
     config_path = _disabled_config(tmp_path)
     try:
         _add_running_assignment(mesh)
+        started = time.monotonic()
         _, payload = _run_cli_dispatch(mesh, config_path)
+        elapsed = time.monotonic() - started
         request = _stored_request(mesh, payload["task_id"])
     finally:
         mesh.storage.close()
 
+    assert elapsed < 3.0, f"offline CLI dispatch took {elapsed:.2f}s"
     assert payload["status"] == "rejected", payload
     assert f"call_depth={MAX_DEPTH}" in payload["error_detail"]
     assert "max_call_depth" in payload["error_detail"]
@@ -106,13 +116,16 @@ def test_cli_dispatch_call_depth_option_cannot_lower_inherited_depth(tmp_path):
     config_path = _disabled_config(tmp_path)
     try:
         _add_running_assignment(mesh)
+        started = time.monotonic()
         completed, payload = _run_cli_dispatch(
             mesh, config_path, "--call-depth", "0", "--trace-chain", '["zcode"]'
         )
+        elapsed = time.monotonic() - started
         request = _stored_request(mesh, payload["task_id"])
     finally:
         mesh.storage.close()
 
+    assert elapsed < 3.0, f"offline CLI dispatch took {elapsed:.2f}s"
     assert "Traceback" not in completed.stderr
     assert payload["status"] == "rejected", completed.stdout
     assert "max_call_depth" in payload["error_detail"]

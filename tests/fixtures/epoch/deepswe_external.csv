@@ -1,0 +1,21 @@
+Model version,Pass@1,Harness,Reasoning effort,Release date,Organization
+gpt-5.5_xhigh,0.6703539823008849,mini-swe-agent,xhigh,2026-04-23,OpenAI
+gpt-5.5_high,0.6438053097345133,mini-swe-agent,high,2026-04-23,OpenAI
+gpt-5.5_medium,0.5398230088495575,mini-swe-agent,medium,2026-04-23,OpenAI
+glm-5.2_max,0.4377777777777778,mini-swe-agent,max,2026-06-16,Z.ai (Zhipu AI)
+glm-5.2_high,0.36283185840707965,mini-swe-agent,high,2026-06-16,Z.ai (Zhipu AI)
+claude-sonnet-4-6_high,0.29933481152993346,mini-swe-agent,high,2026-02-17,Anthropic
+gpt-5.5_low,0.26991150442477874,mini-swe-agent,low,2026-04-23,OpenAI
+gemini-3.5-flash_medium,0.37389380530973454,mini-swe-agent,medium,2026-05-19,Google DeepMind
+qwen3.8-max_xhigh,0.5746102449888641,mini-swe-agent,xhigh,2026-08-02,Alibaba
+gemini-3.5-flash_high,0.3606194690265487,mini-swe-agent,high,2026-05-19,Google DeepMind
+glm-5.3_max,0.6895787139689579,mini-swe-agent,max,2026-08-14,Z.ai (Zhipu AI)
+gemini-3.8-flash_high,0.738255033557047,mini-swe-agent,high,2026-09-02,Google DeepMind
+gemini-3.8-flash_medium,0.7101769911504425,mini-swe-agent,medium,2026-09-02,Google DeepMind
+glm-5.3-flash_max,0.6339285714285714,mini-swe-agent,max,2026-08-20,Z.ai (Zhipu AI)
+gpt-6-astra_xhigh,0.7411504424778761,mini-swe-agent,xhigh,2026-09-03,OpenAI
+gpt-6-astra_high,0.7323008849557522,mini-swe-agent,high,2026-09-03,OpenAI
+gpt-6-astra_max,0.7323008849557522,mini-swe-agent,max,2026-09-03,OpenAI
+gpt-6-astra_medium,0.7278761061946902,mini-swe-agent,medium,2026-09-03,OpenAI
+gpt-6-astra_low,0.6703539823008849,mini-swe-agent,low,2026-09-03,OpenAI
+kimi-k2.7-code,0.3053097345132743,mini-swe-agent,,2026-06-12,Moonshot

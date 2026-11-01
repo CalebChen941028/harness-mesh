@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +22,7 @@ from .config import (
 )
 from .context import ProjectContextManager
 from .discovery import ModelDiscoveryEngine
+from .market import MarketService, blended_price, match_model
 from .models import (
     AssignmentRecord,
     ContinuationCheckpoint,
@@ -27,7 +30,9 @@ from .models import (
     FailoverHop,
     HarnessStatus,
     QuotaExhaustedPolicy,
+    RoutingMode,
     TaskDifficulty,
+    TaskKind,
     TaskRequest,
     TaskResult,
     TaskStatus,
@@ -35,10 +40,26 @@ from .models import (
     utc_now,
 )
 from .quota import QuotaErrorDetector, QuotaGuardian, QuotaRecoveryMonitor
+from .routing import (
+    RouteCandidate,
+    RoutePlanner,
+    RoutingData,
+    RoutingDecision,
+    build_candidates,
+    infer_task_kind,
+    tier_for,
+)
 from .security import WorkspaceRootError, ensure_service_workspace, resolve_allowed_root
 from .skills import SkillPluginManager
 from .storage import StateStore, TaskNotFoundError
 from .workspace import Changes, WorkspaceError, WorkspaceManager
+
+logger = logging.getLogger(__name__)
+
+NO_HARNESS_MESSAGE = (
+    "No supported harness found. Install one of: Claude Code, Codex, "
+    "DeepSeek Harness, Antigravity, ZCode, then run hmesh install."
+)
 
 
 @dataclass
@@ -55,18 +76,24 @@ class MeshRuntime:
     guardian: QuotaGuardian
     monitor: QuotaRecoveryMonitor
     router: "MeshRouter"
+    market: MarketService | None = None
 
     async def start_monitor(self) -> None:
-        """Start quota probing and the durable-effects consumer."""
+        """Start quota probing, the effects consumer and market refresh."""
 
         await self.monitor.start()
         await self.router.start_effects_worker()
+        if self.router.market is not None:
+            self.router.market.start_background_refresh()
 
     async def aclose(self) -> None:
         with contextlib.suppress(Exception):
             await self.monitor.stop()
         with contextlib.suppress(Exception):
             await self.router.stop_effects_worker()
+        if self.router.market is not None:
+            with contextlib.suppress(Exception):
+                await self.router.market.stop_background_refresh()
         self.storage.close()
 
 
@@ -89,6 +116,8 @@ class MeshRouter:
         probe: Any | None = None,
         now_fn: Any | None = None,
         sleep_fn: Any | None = None,
+        market: MarketService | None = None,
+        planner: RoutePlanner | None = None,
     ):
         self.config = config
         self.storage = storage
@@ -148,6 +177,9 @@ class MeshRouter:
         self._workspace_locks: dict[str, asyncio.Lock] = {}
         self._effects_task: asyncio.Task | None = None
         self._effects_stop_event = asyncio.Event()
+        self.market = market or MarketService.from_config(config, storage, env=self.env)
+        self.planner = planner or RoutePlanner.from_config(config.routing)
+        self._routing_payloads: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # public entry points
@@ -174,6 +206,7 @@ class MeshRouter:
             if current is not None and self._running_tasks.get(request.task_id) is current:
                 self._running_tasks.pop(request.task_id, None)
             self._task_locks.pop(request.task_id, None)
+            self._routing_payloads.pop(request.task_id, None)
 
     async def dispatch_task(self, request: TaskRequest | Mapping[str, Any]) -> TaskResult:
         return await self.dispatch(request)
@@ -213,6 +246,9 @@ class MeshRouter:
                     started,
                 )
         trace_chain = list(request.trace_chain)
+        initial_harness = (
+            target if target != "auto" else (self._first_runnable_harness() or "auto")
+        )
 
         rejection = self._check_recursion(target, request, trace_chain)
         if rejection is not None:
@@ -299,7 +335,7 @@ class MeshRouter:
         self.storage.create_task(
             request,
             status=TaskStatus.RUNNING,
-            initial_harness=target if target != "auto" else None,
+            initial_harness=initial_harness if initial_harness != "auto" else None,
             worktree_path=worktree_path,
             worktree_branch=worktree_branch,
             checkpoint=request.checkpoint,
@@ -328,15 +364,92 @@ class MeshRouter:
         except Exception:
             skills_prompt = ""
 
-        selection = await self._select_initial(
+        await self._ensure_market_before_dispatch()
+        routing_decision = await self._route_initial(
             request, root, target, difficulty, workdir
         )
+        routing_tier: str | None = None
+        routing_kind: str | None = routing_decision.task_kind
+        self._routing_payloads[request.task_id] = routing_decision.model_dump(mode="json")
+        selection: tuple[str, str, DiscoveredModel | None] | None = None
+        if routing_decision.chosen is not None:
+            chosen = routing_decision.chosen
+            if self._adapter_runnable(chosen.harness) and self.guardian.is_available(
+                chosen.harness, chosen.model
+            ):
+                selection = (chosen.harness, chosen.model, None)
+                routing_tier = routing_decision.tier
+                if request.reasoning_effort is None and chosen.effort:
+                    effort = chosen.effort
+            else:
+                routing_decision = routing_decision.model_copy(
+                    update={
+                        "chosen": None,
+                        "reasons": [
+                            *routing_decision.reasons,
+                            "the routed candidate became unavailable before dispatch; "
+                            "using the existing difficulty-tier selection",
+                        ],
+                    }
+                )
+                self._routing_payloads[request.task_id] = routing_decision.model_dump(mode="json")
         if selection is None:
+            selection = await self._select_initial(
+                request, root, target, difficulty, workdir
+            )
+        if selection is None:
+            installed = [
+                harness
+                for harness in self.config.ordered_candidates()
+                if harness in self.config.harnesses
+                and self.config.harnesses[harness].enabled
+                and self._adapter_runnable(harness)
+            ]
+            if not installed:
+                return self._terminal_result(
+                    request,
+                    status=TaskStatus.FAILED,
+                    initial_harness=initial_harness,
+                    current_harness=initial_harness,
+                    current_model=request.model or "",
+                    difficulty=difficulty,
+                    effort=effort,
+                    summary=NO_HARNESS_MESSAGE,
+                    error_detail=NO_HARNESS_MESSAGE,
+                    workdir=workdir,
+                    worktree_path=worktree_path,
+                    worktree_branch=worktree_branch,
+                    started=started,
+                    skills=[s.name for s in skills_selected],
+                    plugins=list(active_plugin_names),
+                )
+            blocked = await self._quota_blocked_pair(request, root, target)
+            if blocked is not None and self.config.suspend_when_no_candidate:
+                return self._waiting_result(
+                    request,
+                    initial_harness,
+                    blocked[0],
+                    blocked[1],
+                    difficulty,
+                    effort,
+                    workdir,
+                    worktree_path,
+                    worktree_branch,
+                    started,
+                    skills_selected,
+                    active_plugin_names,
+                    AdapterOutcome(exit_code=0, stdout="", stderr=""),
+                    [],
+                    None,
+                    mode,
+                    ws,
+                    "quota_exhausted_all_candidates",
+                )
             return self._terminal_result(
                 request,
                 status=TaskStatus.FAILED,
-                initial_harness=target,
-                current_harness=target,
+                initial_harness=initial_harness,
+                current_harness=initial_harness,
                 current_model=request.model or "",
                 difficulty=difficulty,
                 effort=effort,
@@ -364,7 +477,7 @@ class MeshRouter:
             target = current_harness
         self.storage.update_task(
             request.task_id,
-            initial_harness=target,
+            initial_harness=initial_harness,
             current_harness=current_harness,
             current_model=current_model,
             resolved_difficulty=difficulty.value,
@@ -402,7 +515,8 @@ class MeshRouter:
                     break
                 if not self._adapter_runnable(current_harness) or not current_model:
                     pair = await self._pick_failover(
-                        request, root, current_harness, current_model or "", exclude_pairs, difficulty
+                        request, root, current_harness, current_model or "", exclude_pairs, difficulty,
+                        tier=routing_tier, task_kind=routing_kind,
                     )
                     if pair is None:
                         break
@@ -411,7 +525,8 @@ class MeshRouter:
                     continue
                 if not self.guardian.is_available(current_harness, current_model):
                     pair = await self._pick_failover(
-                        request, root, current_harness, current_model, exclude_pairs, difficulty
+                        request, root, current_harness, current_model, exclude_pairs, difficulty,
+                        tier=routing_tier, task_kind=routing_kind,
                     )
                     if pair is None:
                         break
@@ -539,7 +654,7 @@ class MeshRouter:
                         return self._terminal_result(
                             request,
                             status=TaskStatus.FAILED,
-                            initial_harness=target,
+                            initial_harness=initial_harness,
                             current_harness=current_harness,
                             current_model=current_model,
                             difficulty=difficulty,
@@ -590,7 +705,7 @@ class MeshRouter:
                     return self._terminal_result(
                         request,
                         status=TaskStatus.TIMEOUT,
-                        initial_harness=target,
+                        initial_harness=initial_harness,
                         current_harness=current_harness,
                         current_model=current_model,
                         difficulty=difficulty,
@@ -668,7 +783,7 @@ class MeshRouter:
                         return self._terminal_result(
                             request,
                             status=TaskStatus.FAILED,
-                            initial_harness=target,
+                            initial_harness=initial_harness,
                             current_harness=current_harness,
                             current_model=current_model,
                             difficulty=difficulty,
@@ -710,7 +825,8 @@ class MeshRouter:
                         )
                     exclude_pairs.add((current_harness, current_model))
                     pair = await self._pick_failover(
-                        request, root, current_harness, current_model, exclude_pairs, difficulty
+                        request, root, current_harness, current_model, exclude_pairs, difficulty,
+                        tier=routing_tier, task_kind=routing_kind,
                     )
                     if pair is None:
                         if self.config.suspend_when_no_candidate:
@@ -737,7 +853,7 @@ class MeshRouter:
                         return self._terminal_result(
                             request,
                             status=TaskStatus.FAILED,
-                            initial_harness=target,
+                            initial_harness=initial_harness,
                             current_harness=current_harness,
                             current_model=current_model,
                             difficulty=difficulty,
@@ -803,7 +919,8 @@ class MeshRouter:
                             assignment.assignment_id, mode,
                         )
                     pair = await self._pick_failover(
-                        request, root, current_harness, current_model, exclude_pairs, difficulty
+                        request, root, current_harness, current_model, exclude_pairs, difficulty,
+                        tier=routing_tier, task_kind=routing_kind,
                     )
                     if pair is not None:
                         new_harness, new_model = pair
@@ -822,7 +939,7 @@ class MeshRouter:
                     return self._terminal_result(
                         request,
                         status=TaskStatus.FAILED,
-                        initial_harness=target,
+                        initial_harness=initial_harness,
                         current_harness=current_harness,
                         current_model=current_model,
                         difficulty=difficulty,
@@ -868,7 +985,8 @@ class MeshRouter:
                     exclude_pairs.add((current_harness, current_model))
                     if self.config.failover_on_error and request.on_quota_exhausted != QuotaExhaustedPolicy.FAIL:
                         pair = await self._pick_failover(
-                            request, root, current_harness, current_model, exclude_pairs, difficulty
+                            request, root, current_harness, current_model, exclude_pairs, difficulty,
+                            tier=routing_tier, task_kind=routing_kind,
                         )
                         if pair is not None:
                             new_harness, new_model = pair
@@ -887,7 +1005,7 @@ class MeshRouter:
                     return self._terminal_result(
                         request,
                         status=TaskStatus.FAILED,
-                        initial_harness=target,
+                        initial_harness=initial_harness,
                         current_harness=current_harness,
                         current_model=current_model,
                         difficulty=difficulty,
@@ -937,7 +1055,7 @@ class MeshRouter:
             return self._terminal_result(
                 request,
                 status=TaskStatus.FAILED,
-                initial_harness=target,
+                initial_harness=initial_harness,
                 current_harness=current_harness,
                 current_model=current_model,
                 difficulty=difficulty,
@@ -983,7 +1101,7 @@ class MeshRouter:
         result = self._build_result(
             request,
             status=TaskStatus.COMPLETED,
-            initial_harness=target,
+            initial_harness=initial_harness,
             current_harness=current_harness,
             current_model=current_model,
             difficulty=difficulty,
@@ -1112,7 +1230,59 @@ class MeshRouter:
         except Exception as exc:
             self._last_discovery_errors[harness] = str(exc)
             return []
+        models = self._apply_market_scores(models)
         return [model for model in models if model.authorized]
+
+    def _apply_market_scores(
+        self, models: Sequence[DiscoveredModel]
+    ) -> list[DiscoveredModel]:
+        """Overlay market intelligence, price and tiers onto discovered models.
+
+        The same overlay feeds `hmesh models`, `hmesh status`,
+        `list_harnesses`, dispatch selection and the routing preview, so the
+        tier map a user sees matches the model a ticket runs on.
+        """
+
+        output = [model.model_copy(deep=True) for model in models]
+        catalog = self.market.catalog() if self.market is not None else None
+        changed = False
+        if catalog is not None and catalog.models:
+            by_key = {model.key: model for model in catalog.models}
+            for model in output:
+                found = match_model(
+                    model.model_id,
+                    catalog.models,
+                    aliases=self.config.market.aliases,
+                )
+                market = by_key.get(found.key) if found.key else None
+                if market is None:
+                    continue
+                model.blended_price = blended_price(market)
+                if market.intelligence is not None:
+                    model.intelligence = market.intelligence
+                    model.intelligence_source = market.intelligence_source or "heuristic"
+                    model.capability_score = round(float(market.intelligence), 2)
+                    changed = True
+        if changed:
+            self.discovery.classify_and_assign_tiers(output)
+        for model in output:
+            if model.intelligence is None:
+                model.intelligence = round(float(model.capability_score), 2)
+                model.intelligence_source = "heuristic"
+        return output
+
+    def _tier_model_for(
+        self, models: Sequence[DiscoveredModel], difficulty: str
+    ) -> DiscoveredModel | None:
+        authorized = [model for model in models if model.authorized]
+        if not authorized:
+            return None
+        mapping = self.discovery.tier_models_for(authorized)
+        preferred = mapping.get(str(difficulty))
+        for model in authorized:
+            if model.model_id == preferred:
+                return model
+        return max(authorized, key=lambda item: item.capability_score)
 
     async def _gather_candidate_models(self, root: Path) -> list[DiscoveredModel]:
         candidates: list[DiscoveredModel] = []
@@ -1164,14 +1334,21 @@ class MeshRouter:
             return False
         return True
 
-    async def _select_initial(
-        self,
-        request: TaskRequest,
-        root: Path,
-        target: str,
-        difficulty: TaskDifficulty,
-        workdir: Path,
-    ) -> tuple[str, str, DiscoveredModel] | None:
+    def _first_runnable_harness(self) -> str:
+        for harness in self.config.ordered_candidates():
+            if harness not in self.config.harnesses:
+                continue
+            if not self.config.harnesses[harness].enabled:
+                continue
+            if self._adapter_runnable(harness):
+                return harness
+        return ""
+
+    async def _collect_targets_and_models(
+        self, request: TaskRequest, root: Path, target: str
+    ) -> tuple[list[str], list[DiscoveredModel]]:
+        """Enumerate live targets and authorised models after the usual filters."""
+
         ordered_targets: list[str] = []
         if target == "auto":
             ordered_targets = self.config.ordered_candidates()
@@ -1196,6 +1373,256 @@ class MeshRouter:
                 if pair not in seen:
                     seen.add(pair)
                     all_candidates.append(model)
+        return ordered_targets, all_candidates
+
+    def _resolve_routing_mode(self, request: TaskRequest) -> RoutingMode:
+        if "routing_mode" in request.model_fields_set:
+            return RoutingMode(str(request.routing_mode))
+        environment = self.env if self.env is not None else os.environ
+        env_value = str(environment.get("HARNESS_MESH_ROUTING", "")).strip().lower()
+        if env_value in {mode.value for mode in RoutingMode}:
+            return RoutingMode(env_value)
+        try:
+            return RoutingMode(str(self.config.routing.mode).strip().lower())
+        except ValueError:
+            return RoutingMode.AUTO
+
+    def _routing_kind(self, request: TaskRequest, difficulty: TaskDifficulty) -> TaskKind:
+        return infer_task_kind(request.objective, difficulty, request.task_kind)
+
+    def _manual_decision(
+        self,
+        request: TaskRequest,
+        difficulty: TaskDifficulty,
+        mode: RoutingMode,
+        reason: str,
+    ) -> RoutingDecision:
+        kind = self._routing_kind(request, difficulty)
+        catalog = self.market.catalog()
+        return RoutingDecision(
+            mode=mode.value,
+            task_kind=kind.value,
+            tier=tier_for(kind, difficulty).value,
+            reasons=[reason, "prices are API list prices used as a proxy for quota consumption"],
+            data=RoutingData(
+                sources=list(catalog.sources),
+                fetched_at=catalog.fetched_at,
+                stale=catalog.stale,
+                expired=catalog.expired,
+            ),
+        )
+
+    def _build_route_candidates(
+        self,
+        models: list[DiscoveredModel],
+        catalog: Any,
+        tier: str,
+        request: TaskRequest,
+    ) -> list[RouteCandidate]:
+        return build_candidates(
+            models,
+            catalog.models,
+            tier=tier,
+            aliases=self.config.market.aliases,
+            available=self.guardian.is_available,
+            preferred_effort=request.reasoning_effort,
+        )
+
+    async def _quota_blocked_pair(
+        self, request: TaskRequest, root: Path, target: str
+    ) -> tuple[str, str] | None:
+        """Return a blocked harness/model when every candidate is quota-open."""
+
+        _ordered, models = await self._collect_targets_and_models(request, root, target)
+        if target != "auto":
+            models = [model for model in models if model.harness == target]
+        if not models:
+            return None
+        blocked = [
+            model
+            for model in models
+            if not self.guardian.is_available(model.harness, model.model_id)
+        ]
+        if len(blocked) != len(models):
+            return None
+        return blocked[0].harness, blocked[0].model_id
+
+    async def _ensure_market_before_dispatch(self) -> None:
+        """Wait at most ``market.wait_seconds`` for the first market snapshot."""
+
+        market = self.market
+        if market is None:
+            return
+        if market.skip_next_dispatch_wait:
+            market.skip_next_dispatch_wait = False
+            return
+        if not market.requires_network:
+            return
+        if market.catalog().models:
+            return
+        try:
+            await market.ensure_fresh(timeout=float(self.config.market.wait_seconds))
+        except Exception as exc:  # a cold source never fails a ticket
+            logger.warning("market warm-up failed: %s", exc)
+
+    async def _route_initial(
+        self,
+        request: TaskRequest,
+        root: Path,
+        target: str,
+        difficulty: TaskDifficulty,
+        workdir: Path | None = None,
+    ) -> RoutingDecision:
+        mode = self._resolve_routing_mode(request)
+        kind = self._routing_kind(request, difficulty)
+        base_tier = tier_for(kind, difficulty).value
+        if request.model:
+            return self._manual_decision(
+                request,
+                difficulty,
+                RoutingMode.MANUAL,
+                f"request names model {request.model}; routing is bypassed",
+            )
+        if mode == RoutingMode.MANUAL:
+            return self._manual_decision(
+                request,
+                difficulty,
+                mode,
+                "routing mode is manual; the existing difficulty-tier selection applies",
+            )
+        if mode == RoutingMode.OFF:
+            return self._manual_decision(
+                request,
+                difficulty,
+                mode,
+                "routing is off; the existing difficulty-tier selection applies",
+            )
+
+        catalog = self.market.catalog()
+        data = RoutingData(
+            sources=list(catalog.sources),
+            fetched_at=catalog.fetched_at,
+            stale=catalog.stale,
+            expired=catalog.expired,
+        )
+        if not catalog.models:
+            return RoutingDecision(
+                mode=mode.value,
+                task_kind=kind.value,
+                tier=base_tier,
+                reasons=[
+                    "no market data is cached; falling back to the existing difficulty-tier selection",
+                ],
+                data=data,
+            )
+
+        _ordered, models = await self._collect_targets_and_models(request, root, target)
+        if target != "auto":
+            models = [model for model in models if model.harness == target]
+        if not models:
+            return RoutingDecision(
+                mode=mode.value,
+                task_kind=kind.value,
+                tier=base_tier,
+                reasons=["no authorised, quota-healthy model was available to route"],
+                data=data,
+            )
+        candidates = self._build_route_candidates(models, catalog, base_tier, request)
+        if not candidates:
+            return RoutingDecision(
+                mode=mode.value,
+                task_kind=kind.value,
+                tier=base_tier,
+                reasons=["every authorised model is outside the market catalogue"],
+                data=data,
+            )
+        if not any(candidate.market_key for candidate in candidates):
+            return RoutingDecision(
+                mode=mode.value,
+                task_kind=kind.value,
+                tier=base_tier,
+                reasons=[
+                    "none of the harness models matched the market catalogue; "
+                    "add market.aliases or refresh the cache",
+                    "falling back to the existing difficulty-tier selection",
+                ],
+                data=data,
+            )
+        decision = self.planner.plan(
+            candidates,
+            task_kind=kind,
+            difficulty=difficulty,
+            mode=mode,
+            tier=base_tier,
+            catalog=catalog,
+            max_price_per_mtok=request.max_price_per_mtok,
+            min_intelligence=request.min_intelligence,
+        )
+        if decision.chosen is None:
+            decision.reasons.append(
+                "routing produced no choice; falling back to the existing difficulty-tier selection"
+            )
+        return decision
+
+    async def preview_routing(
+        self,
+        objective: str,
+        task_kind: str = TaskKind.AUTO.value,
+        difficulty: str = TaskDifficulty.AUTO.value,
+        target_harness: str = "auto",
+    ) -> dict[str, Any]:
+        """Rank candidates without creating a ticket or running an adapter."""
+
+        requested_harness = (target_harness or "auto").strip()
+        if requested_harness != "auto" and requested_harness not in self.config.harnesses:
+            return {"error": f"unknown target_harness '{requested_harness}'"}
+        resolved = (
+            evaluate_difficulty(objective)
+            if str(difficulty) == TaskDifficulty.AUTO.value
+            else TaskDifficulty(str(difficulty))
+        )
+        kind = infer_task_kind(objective, resolved, task_kind)
+        tier = tier_for(kind, resolved).value
+        catalog = self.market.catalog()
+        request = TaskRequest(
+            target_harness=requested_harness,
+            objective=objective,
+            difficulty=resolved,
+            task_kind=kind,
+            workspace_root=str(self.workspace_root),
+        )
+        _ordered, models = await self._collect_targets_and_models(
+            request, self.workspace_root, requested_harness
+        )
+        if requested_harness != "auto":
+            models = [model for model in models if model.harness == requested_harness]
+        candidates = self._build_route_candidates(models, catalog, tier, request)
+        decision = self.planner.plan(
+            candidates,
+            task_kind=kind,
+            difficulty=resolved,
+            tier=tier,
+            catalog=catalog,
+        )
+        return {
+            "task_kind": kind.value,
+            "tier": tier,
+            "candidate_count": len(candidates),
+            "market_models": len(catalog.models),
+            "routing": decision.model_dump(mode="json"),
+        }
+
+    async def _select_initial(
+        self,
+        request: TaskRequest,
+        root: Path,
+        target: str,
+        difficulty: TaskDifficulty,
+        workdir: Path,
+    ) -> tuple[str, str, DiscoveredModel | None] | None:
+        ordered_targets, all_candidates = await self._collect_targets_and_models(
+            request, root, target
+        )
 
         if not all_candidates:
             return None
@@ -1210,7 +1637,10 @@ class MeshRouter:
             for harness in ordered_targets:
                 if harness in request.trace_chain:
                     continue
-                candidate = self.discovery.resolve_model(harness, difficulty.value)
+                candidate = self._tier_model_for(
+                    [item for item in all_candidates if item.harness == harness],
+                    difficulty.value,
+                )
                 if candidate is not None and candidate.authorized:
                     preferred = candidate
                     break
@@ -1240,6 +1670,9 @@ class MeshRouter:
         current_model: str,
         exclude_pairs: set[tuple[str, str]],
         difficulty: TaskDifficulty,
+        *,
+        tier: str | None = None,
+        task_kind: str | None = None,
     ) -> tuple[str, str] | None:
         models = await self._gather_candidate_models(root)
         if not models:
@@ -1249,6 +1682,35 @@ class MeshRouter:
             models = [model for model in models if model.harness not in blocked_ancestors]
             if not models:
                 return None
+        if tier and task_kind:
+            catalog = self.market.catalog()
+            if catalog.models:
+                candidates = build_candidates(
+                    models,
+                    catalog.models,
+                    tier=tier,
+                    aliases=self.config.market.aliases,
+                    available=lambda harness, model: self.guardian.is_available(
+                        harness, model, allow_half_open=False
+                    ),
+                )
+                candidates = [
+                    candidate
+                    for candidate in candidates
+                    if (candidate.harness, candidate.model) not in exclude_pairs
+                    and (candidate.harness, candidate.model)
+                    != (current_harness, current_model)
+                ]
+                if candidates:
+                    decision = self.planner.plan(
+                        candidates,
+                        task_kind=task_kind,
+                        difficulty=difficulty,
+                        tier=tier,
+                        catalog=catalog,
+                    )
+                    if decision.chosen is not None:
+                        return decision.chosen.harness, decision.chosen.model
         preferred = list(request.fallback_harnesses)
         return self.guardian.select_failover_candidate(
             models,
@@ -1325,6 +1787,7 @@ class MeshRouter:
             native_session_id=outcome.session_id if outcome else None,
             duration_ms=int((self.now_fn() - started) * 1000),
             error_detail=error_detail,
+            routing=self._routing_payloads.get(task_id),
         )
         if checkpoint is not None:
             self.storage.update_task(task_id, checkpoint_json=checkpoint)
@@ -1724,9 +2187,36 @@ class MeshRouter:
         self.storage.save_resource(task_id, "transcript", combined)
 
     def _render_transcripts(self, request: TaskRequest, transcripts: list[dict[str, Any]]) -> str:
-        if not transcripts:
-            return ""
         blocks: list[str] = []
+        routing = self._routing_payloads.get(request.task_id)
+        if routing:
+            chosen = routing.get("chosen") or {}
+            reason_lines = "\n".join(
+                f"- {reason}" for reason in (routing.get("reasons") or [])
+            )
+            blocks.append(
+                "\n".join(
+                    [
+                        "=== Routing ===",
+                        f"mode: {routing.get('mode')} task_kind: {routing.get('task_kind')} "
+                        f"tier: {routing.get('tier')}",
+                        "chosen: "
+                        + (
+                            f"{chosen.get('harness')}/{chosen.get('model')} "
+                            f"effort={chosen.get('effort') or 'default'} "
+                            f"intelligence={chosen.get('intelligence')} "
+                            f"source={chosen.get('intelligence_source')} "
+                            f"blended_price={chosen.get('blended_price')}"
+                            if chosen
+                            else "none (existing difficulty-tier selection)"
+                        ),
+                        "reasons:",
+                        reason_lines,
+                    ]
+                )
+            )
+        if not transcripts:
+            return "\n\n".join(blocks)
         for item in transcripts:
             blocks.append(
                 "\n".join(
@@ -1940,16 +2430,36 @@ class MeshRouter:
                         mode="custom",
                         version_or_detail="custom adapter",
                     )
-            try:
-                models = await self.discovery.discover_for_harness(
-                    harness, workspace_root=self.workspace_root, force_refresh=refresh_models
-                )
-            except Exception:
-                models = self.storage.list_discovered_models(harness)
+            if not status.available and status.mode == "missing":
+                # An uninstalled harness must not show the example config's
+                # models or tiers: nothing was discovered on this machine.
+                status.installed = False
+                models = []
+            else:
+                try:
+                    models = await self.discovery.discover_for_harness(
+                        harness, workspace_root=self.workspace_root, force_refresh=refresh_models
+                    )
+                except Exception:
+                    models = self.storage.list_discovered_models(harness)
+                models = self._apply_market_scores(models)
             authorized = [model.model_id for model in models if model.authorized]
             tier_models = self._tier_models_from_models(models)
             status.authorized_models = authorized
             status.tier_models = tier_models
+            status.model_details = [
+                {
+                    "model_id": model.model_id,
+                    "authorized": model.authorized,
+                    "capability_score": model.capability_score,
+                    "intelligence": model.intelligence,
+                    "intelligence_source": model.intelligence_source,
+                    "blended_price": model.blended_price,
+                    "assigned_tiers": list(model.assigned_tiers),
+                    "source": model.source,
+                }
+                for model in models
+            ]
             if not status.active_default_model:
                 for model in models:
                     if model.authorized and model.is_active_default:
@@ -1998,21 +2508,41 @@ class MeshRouter:
 
     async def _discover_payload(self, harness: str, force_refresh: bool) -> dict[str, Any]:
         if harness not in self.config.harnesses:
-            return {"harness": harness, "error": "unknown harness", "models": [], "tier_models": {}}
+            return {
+                "harness": harness,
+                "error": "unknown harness",
+                "installed": False,
+                "models": [],
+                "tier_models": {},
+            }
+        if not self._adapter_runnable(harness):
+            return {
+                "harness": harness,
+                "installed": False,
+                "reason": "not installed",
+                "models": [],
+                "tier_models": {},
+                "authorized_models": [],
+            }
         try:
             models = await self.discovery.discover_for_harness(
                 harness, workspace_root=self.workspace_root, force_refresh=force_refresh
             )
         except Exception as exc:
-            models = self.storage.list_discovered_models(harness)
+            models = self._apply_market_scores(
+                self.storage.list_discovered_models(harness)
+            )
             return {
                 "harness": harness,
                 "error": str(exc),
+                "installed": True,
                 "models": [model.model_dump(mode="json") for model in models],
                 "tier_models": self._tier_models_from_models(models),
             }
+        models = self._apply_market_scores(models)
         return {
             "harness": harness,
+            "installed": True,
             "models": [model.model_dump(mode="json") for model in models],
             "tier_models": self._tier_models_from_models(models),
             "authorized_models": [model.model_id for model in models if model.authorized],
@@ -2263,6 +2793,7 @@ def create_mesh_runtime(
         guardian=guardian,
         monitor=router.monitor,
         router=router,
+        market=router.market,
     )
 
 

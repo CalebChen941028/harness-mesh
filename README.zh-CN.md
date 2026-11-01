@@ -10,7 +10,7 @@ Harness-Mesh 是本地编排层，交付形态有四个：
 
 - Python 包 `harness_mesh`：类型化数据模型和 SQLite 状态账本；
 - 命令行 `hmesh`：查看状态、发现模型、派发任务、管理共享上下文、合入补丁；
-- stdio MCP 服务端 `hmesh-mcp`：向主控 Harness 暴露 13 个工具；
+- stdio MCP 服务端 `hmesh-mcp`：向主控 Harness 暴露 15 个工具；
 - 本地运行目录 `.harness-mesh/`：状态库、Worktree、分页资源。
 
 它不提供模型、不运营云端服务、不带 Web UI 或多租户调度。模型调用由本机已安装并登录的 Harness CLI 完成；Harness-Mesh 只在本地记录状态，并把裁剪后的摘要返回给主控端。
@@ -28,7 +28,7 @@ Harness-Mesh 是本地编排层，交付形态有四个：
 | 范围内 | 范围外 |
 | :--- | :--- |
 | 从本地配置、环境变量、实时模型接口和 CLI 枚举动态发现已授权模型 | 维护固定或托管的模型目录 |
-| 四档难度路由（`low` → `critical`）与技能/插件注入 | 训练或托管模型 |
+| 四档难度与按任务类型的市场感知路由，以及技能/插件注入 | 训练或托管模型 |
 | 额度耗尽、模型未授权、凭证失效、瞬态错误时的 Ticket/Assignment 换棒 | 多租户认证、RBAC、计费 |
 | Git Worktree 隔离、脏工作区同步、依赖补丁预应用、显式合入 | 未经审查自动合并 Worktree |
 | 项目规范桥接、跨 Harness 记忆黑板、依赖上下文 | 把项目数据上传到远程服务 |
@@ -78,7 +78,7 @@ hmesh install
 ```bash
 hmesh install --dry-run                 # 只显示计划执行的命令/文件，不修改任何配置
 hmesh install --yes                     # 非交互确认后安装
-hmesh install --approve read            # 预先批准 7 个只读 MCP 工具
+hmesh install --approve read            # 预先批准 9 个只读 MCP 工具
 hmesh install --harness zcode           # 只安装一个 Harness（可重复）
 hmesh install --workspace /path/project # 显式绑定 MCP 工作区
 hmesh install --uninstall               # 卸载集成
@@ -91,13 +91,13 @@ hmesh install --uninstall               # 卸载集成
 交互式会话在调用 MCP 工具前会询问。`codex exec`、`agy -p` 这类无界面命令无法回答，`hmesh install` 因此按工具写入放行规则：
 
 ```bash
-hmesh install --approve dispatch   # 默认：10 个只读与调度工具
-hmesh install --approve read       # 7 个只读工具
-hmesh install --approve all        # 全部 13 个
+hmesh install --approve dispatch   # 默认：12 个只读与调度工具
+hmesh install --approve read       # 9 个只读工具
+hmesh install --approve all        # 全部 15 个
 hmesh install --approve none       # 不写入，并清掉本工具写过的规则
 ```
 
-默认级别 `dispatch` 批准 7 个只读工具，以及 `dispatch_task`、`parallel_dispatch`、`cancel_task`。派发任务在隔离 Worktree 内运行，改动要经过 `apply_task_patch` 才进入主工作区。三个写入工具仍默认人工批准：`apply_task_patch`、`report_quota_status`、`update_project_context` 会改动主工作区或共享状态。确实需要时用 `--approve all` 一并放行。
+默认级别 `dispatch` 批准 9 个只读工具，以及 `dispatch_task`、`parallel_dispatch`、`cancel_task`。派发任务在隔离 Worktree 内运行，改动要经过 `apply_task_patch` 才进入主工作区。三个写入工具仍默认人工批准：`apply_task_patch`、`report_quota_status`、`update_project_context` 会改动主工作区或共享状态。确实需要时用 `--approve all` 一并放行。
 
 | Harness | 文件 | 规则 |
 | :--- | :--- | :--- |
@@ -120,11 +120,16 @@ ZCode 的 `--scope project` 仍会写入全局状态文件 `~/.zcode/cli/plugins
 # 查看 Harness、真实二进制、版本和已授权模型
 hmesh status
 
-# 强制执行三层模型发现与四档映射
+# 强制执行三层模型发现与档位映射
 hmesh models --refresh
 
 # 查看额度熔断器与挂起队列
 hmesh quota --probe
+
+# 拉取市场标价与评测分，再预览路由
+hmesh market refresh
+hmesh market show --unmatched
+hmesh route --objective "设计迁移方案" --kind plan
 
 # 查看本机 SKILL.md 与插件清单
 hmesh skills
@@ -149,7 +154,7 @@ hmesh apply <task_id> --strategy copy --force-copy
 hmesh doctor
 ```
 
-MCP 服务端默认启动额度探活与 effects 消费；只想要请求/响应时可关闭：
+MCP 服务端默认启动额度探活、effects 消费与市场刷新；只想要请求/响应时可关闭：
 
 ```bash
 hmesh-mcp
@@ -211,7 +216,74 @@ Ticket task_x（一份 Git Worktree）
 
 `TaskRequest.session_id` 会透传到 MCP 和 `AdapterCall`。适配器将其映射为 Claude/ZCode `--resume`、`codex exec resume <id>`、DSH `--session-id`、Antigravity `--conversation`。写入模式自动注入各 CLI 的审批放行参数；只读 Ticket 使用 plan/read-only 模式并在一次性 Worktree 中执行。
 
-## MCP 工具（13 个）
+## 模型市场与路由
+
+Harness-Mesh 可以按公开标价和评测分给模型排序，不必只依赖四档难度。数据层只读，与派发流程分开。
+
+### 数据来源
+
+| 来源 | 密钥 | 使用的字段 |
+| :--- | :--- | :--- |
+| OpenRouter `/api/v1/models` | 无 | 每 token 标价、上下文窗口、推理与工具标志 |
+| models.dev `/api.json` | 无 | 每百万 token 标价、上下文窗口、发布日期 |
+| Epoch AI `benchmark_data.zip` | 无 | 推理与编码基准分位、基准日期 |
+| Artificial Analysis `/api/v2/language/models/free` | `ARTIFICIAL_ANALYSIS_API_KEY` | 智能指数、标价、输出速度 |
+
+models.dev 按提供商逐条列出同一个模型，其中包含几百个转售平台。这些条目按模型名折叠成一个规范模型。价格依次取模型原厂的条目（列在 `market.first_party_providers`）、OpenRouter、全部有效报价的中位数。输入与输出都为 0 的条目不当作免费，记为价格未知。
+
+Epoch AI 以 CC BY 4.0 发布 [Capabilities & benchmarking](https://epoch.ai/benchmarks) 数据，不需要密钥，因此是默认的评测来源。每个基准在 540 天参考窗口内折算成一个百分位（`market.epoch.reference_window_days`）；某个轴的有效基准少于三个时留空（`market.epoch.min_benchmarks`）。两条轴分别是 `intelligence_reasoning` 与 `intelligence_coding`，`intelligence` 取模型已有轴的等权平均。配置了 `ARTIFICIAL_ANALYSIS_API_KEY` 时 Artificial Analysis 优先。两个来源都没有时，用现有发现分数、价格分位、推理标志和发布日期算出启发式分数。
+
+启发式分数不是评测分。每个分数都带 `intelligence_source`，取值为 `epoch_ai`、`artificial_analysis`、`override` 或 `heuristic`；`hmesh market show` 与 `get_model_market` MCP 工具都会显示该字段。
+
+Epoch AI 数据采用 CC BY 4.0，需要署名。`hmesh market show` 末尾固定输出 `Benchmark data: Epoch AI, 'Capabilities & benchmarking', https://epoch.ai/benchmarks (CC BY 4.0)`；`--json` 把同一字符串放在 `attribution` 字段，每条路由决策也带该字段。
+
+`hmesh market refresh` 把快照写入 `.harness-mesh/state.db`。默认缓存 6 小时；Epoch AI 与 Artificial Analysis 至少缓存 12 小时，Artificial Analysis 每个进程每天最多请求 20 次。刷新失败保留旧快照并标记 stale；超过 7 天的缓存仍可用，同时标记 expired。
+
+`market.enabled: false` 或 `HARNESS_MESH_OFFLINE=1` 会关闭全部外发请求。
+
+### 自动刷新
+
+缓存不需要手动维护。MCP 服务启动时若某个来源缺失或超过 TTL，会在后台刷新，之后按 TTL 周期刷新。第一次派发如果完全没有市场数据，最多等待 `market.wait_seconds`（8 秒），随后先用本地分档继续，刷新在后台完成。一次性命令（`dispatch`、`route`、`status`、`models`、`market show`）用同样的 8 秒上限同步刷新；来源变慢或失败时回落到旧快照或启发式，只记一条警告。
+
+控制端只发目标，不必点名模型。MCP 的 `dispatch_task` 与 `hmesh dispatch` 都把 `target_harness` 默认成 `auto`，由 Mesh 在所有已安装的 Harness 之间路由并选模型。MCP 的 `initialize` 响应会把这条规则告诉每个客户端。显式传入 `model` 或 `target_harness` 时行为不变。
+
+机器上只装五家中的一两家时，`hmesh status`、`hmesh models` 与 `list_harnesses` 把未安装的 Harness 标成 `not installed` 并给出原因，模型与分档留空；`hmesh doctor` 末尾汇总 `N of 5 harnesses installed`。`hmesh install --dry-run` 对缺少二进制的 Harness 返回 `skipped`；ZCode 既没有 CLI 也没有应用时返回 `ZCode not found`，不写插件文件。
+
+市场分数同时驱动模型发现：Harness 模型匹配到目录后，`capability_score`、`assigned_tiers` 与分档映射改用市场智能分，没有匹配时保持原启发式。`hmesh models`、`hmesh status` 与 `list_harnesses` 会显示每个模型的 `intelligence`、`intelligence_source` 与混合价格，因此用户看到的分档、派发选中的模型和路由预览保持一致。`hmesh doctor` 增加只读的 `market` 一行：数据来源、最近一次成功刷新、是否过期、匹配率与未匹配模型。
+
+### 任务类型与档位
+
+`task_kind` 取 `plan`、`audit`、`review`、`implement`、`refactor`、`debug`、`test`、`docs`、`auto`。`auto` 先读目标文本里的中英文关键词，没有命中就沿用 `evaluate_difficulty`。
+
+| 档位 | 任务类型与难度 | 规则 |
+| :--- | :--- | :--- |
+| `premium` | `plan`、`audit`、`review`，或 `critical` | 智能分最高；并列时取混合价格低者 |
+| `balanced` | `refactor`、`debug`，或 `high` | 在智能分不低于最高值 85% 的候选里，取每美元智能分最高者 |
+| `value` | `implement`、`test`、`docs`，或 `low`/`medium` | 在难度下限之上取最便宜者（low 0.55，medium 0.70） |
+
+`blended_price = (3 * input + output) / 4`，单位为美元每百万 token。价格未知的模型不参与价格比较，只在没有别的候选时使用。
+
+`routing.axis_weights` 决定任务类型落在哪条评测轴上：`plan`、`audit`、`review` 用推理 0.7 / 编码 0.3；`implement`、`refactor`、`debug`、`test` 用编码 0.7 / 推理 0.3；`docs` 用推理 1.0。模型只有一条轴时，该轴按全权重计算。
+
+Claude Code 与 Codex 走订阅额度，不按 token 单独计费。路由把 API 标价当作额度消耗的代理值，并在每条决策记录里注明。
+
+### 路由模式
+
+`routing.mode` 默认 `auto`。`manual` 保留你传入的模型；`off` 回到四档难度。`HARNESS_MESH_ROUTING` 覆盖配置默认值，请求里的 `routing_mode` 优先级最高。
+
+`routing.pins` 按任务类型固定 `{harness, model}`。`routing.premium_hints` 与 `routing.value_hints` 给命中的模型加权；`routing.strict_hints: true` 时改为硬过滤。示例配置用精确 glob `glm-5.3`，不会匹配 `glm-5.3-flash`。
+
+没有市场快照、Harness 模型全部匹配不上，或规划器没有给出选择时，派发回落到 `discovery.resolve_model(harness, difficulty)`；决策记录保留原因。
+
+### 决策记录
+
+每个结果都带 `routing` 字段：模式、任务类型、档位、选中的 Harness/模型/推理档、智能分与来源、`axis_scores`（两条轴的分数与权重）、`benchmarks_used`、署名、标价、前三名备选及得分、数据来源、`fetched_at`、`stale`、`expired`、匹配置信度。同一段内容出现在转录开头。
+
+### 未接入的来源
+
+Aider polyglot 排行榜在 2025-10 之后没有新数据；社区维护的 LMArena 快照（`oolong-tea-2026/arena-ai-leaderboards`）从 2026-10-20 起每天返回空的 `leaderboards`；`api.llm-stats.com` 的分数多为厂商自报（`verified: false`），带 AA-Index 的只有 4 个模型，服务条款页返回 404。三个来源都没有接入。
+
+## MCP 工具（15 个）
 
 `list_harnesses`、`discover_harness_models`、`list_skills_and_plugins`、`dispatch_task`、`parallel_dispatch`、`get_task_status`、`read_task_resource`、`get_quota_status`、`report_quota_status`、`apply_task_patch`、`cancel_task`、`get_project_context`、`update_project_context`。
 
@@ -225,8 +297,11 @@ hmesh doctor [--harness H] [--json]
 hmesh status [--refresh] [--json]
 hmesh models [--refresh] [--harness H]
 hmesh quota [--probe]
+hmesh route --objective O [--kind K] [--difficulty D] [--harness H] [--json]
+hmesh market refresh [--source S]... [--json]
+hmesh market show [--model GLOB] [--axis reasoning|coding] [--unmatched] [--json]
 hmesh skills [--query Q]
-hmesh dispatch --harness H --objective O [--difficulty D] [--fallback H]...
+hmesh dispatch --objective O [--harness H] [--difficulty D] [--fallback H]...
 hmesh tasks [--status S]
 hmesh read <task_id> [diff|transcript|assignments] [--offset N] [--limit N]
 hmesh apply <task_id> [--strategy patch|merge|copy] [--force-copy]
@@ -241,6 +316,28 @@ hmesh init-mcp [--print] [--target PATH]
 
 模板占位符：`{prompt}`、`{system_prompt}`、`{system_prompt_file}`、`{model}`、`{effort}`、`{workdir}`、`{mcp_config}`、`{task_id}`、`{assignment_id}`。空 flag/value 对会自动省略，因此 `<cli_active_default>` 表示使用 Harness 自己的激活模型。
 
+市场与路由设置：
+
+| 配置 | 默认值 | 含义 |
+| :--- | :--- | :--- |
+| `market.enabled` | `true` | 只读市场数据与快照缓存 |
+| `market.ttl_seconds` | `21600` | OpenRouter 与 models.dev 的缓存时长 |
+| `market.wait_seconds` | `8` | 自动刷新在派发或命令继续前的最长等待 |
+| `market.sources` | 四个来源 | 需要刷新的来源 |
+| `market.first_party_providers` | `[]`（示例配置列出十二个） | 用自家 models.dev 条目定标价的厂商 |
+| `market.epoch.reasoning_benchmarks` | 六个基准 | 推理轴使用的基准 |
+| `market.epoch.coding_benchmarks` | 九个基准 | 编码轴使用的基准 |
+| `market.epoch.reference_window_days` | `540` | 基准最新发布日期之前的百分位窗口 |
+| `market.epoch.min_benchmarks` | `3` | 一条轴至少要有几个有效基准 |
+| `market.aliases` | `{}` | 把 Harness 模型 id 或 glob 映射到市场键 |
+| `market.overrides` | `{}` | 按 glob 覆盖智能分与价格 |
+| `routing.mode` | `auto` | `auto`、`manual` 或 `off`；`HARNESS_MESH_ROUTING` 优先 |
+| `routing.floors` | `0.55/0.70` | value 档按难度取的智能分下限 |
+| `routing.axis_weights` | 按任务类型 | 给任务打分时推理轴与编码轴的权重 |
+| `routing.premium_hints` / `routing.value_hints` | `[]` | 按档位加权的模型 glob |
+| `routing.strict_hints` | `false` | 把加权改为硬过滤 |
+| `routing.pins` | `{}` | 按任务类型固定 Harness/模型 |
+
 ## 测试
 
 ```bash
@@ -249,7 +346,7 @@ hmesh init-mcp [--print] [--target PATH]
 .venv/bin/pytest -v
 ```
 
-快速测试使用 Mock 适配器与临时 Git 仓库。`tests/test_local_machine_harnesses.py` 在本机存在 macOS 应用包时运行真机联调：真实二进制解析、五家模型清单、以及一次真实 DeepSeek 任务在 Worktree 中创建文件并合回主工作区。开发流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+快速测试使用 Mock 适配器、临时 Git 仓库、`httpx.MockTransport` 市场提供者与缓存快照，不会打开网络连接。真实 HTTP 检查放在 `tests/test_real_machine_market.py`，只有设置 `HARNESS_MESH_REAL_MACHINE=1` 才运行；Artificial Analysis 分支还需要 `ARTIFICIAL_ANALYSIS_API_KEY`。`tests/test_local_machine_harnesses.py` 在本机存在 macOS 应用包时运行真机联调：真实二进制解析、五家模型清单、以及一次真实 DeepSeek 任务在 Worktree 中创建文件并合回主工作区。开发流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 运维与边界
 

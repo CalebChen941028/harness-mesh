@@ -172,6 +172,31 @@ class HarnessInstaller:
             results.append(result)
         return results
 
+    def installed_harnesses(self) -> list[str]:
+        """Standard harnesses whose binary or app is present, without writing."""
+
+        installed: list[str] = []
+        for name in ("claude_code", "codex", "deepseek", "antigravity", "zcode"):
+            config = self.config.harnesses.get(name)
+            if config is None or not config.enabled:
+                continue
+            binary = resolve_harness_binary(
+                config,
+                self.which,
+                None,
+                self.home_dir,
+                allow_system_paths=self.allow_system_paths,
+            )
+            if binary is not None:
+                installed.append(name)
+            elif name == "zcode" and self._zcode_app_present():
+                installed.append(name)
+            elif name == "deepseek" and any(
+                self.env.get(variable) for variable in config.api_key_env
+            ):
+                installed.append(name)
+        return installed
+
     def doctor(self, harnesses: Iterable[str] | None = None) -> list[DoctorResult]:
         requested = list(harnesses or [])
         if not requested:
@@ -941,10 +966,23 @@ class HarnessInstaller:
         )
         return [marketplace, manifest, skill]
 
+    def _zcode_app_present(self) -> bool:
+        config = self.config.harnesses.get("zcode")
+        extra = config.extra if config is not None else {}
+        for key in ("macos_electron_bin", "macos_cjs_entry"):
+            value = str(extra.get(key) or "").strip()
+            if value and Path(value).expanduser().exists():
+                return True
+        return False
+
     def _install_zcode(self) -> InstallResult:
         commands: list[list[str]] = []
-        files = self._zcode_files()
         binary = self._resolve_binary("zcode")
+        if binary is None and not self._zcode_app_present():
+            # Nothing to integrate with: do not write a plugin the app cannot
+            # discover anyway.
+            return InstallResult("zcode", "skipped", "ZCode not found")
+        files = self._zcode_files()
         if binary is None:
             return InstallResult(
                 "zcode",

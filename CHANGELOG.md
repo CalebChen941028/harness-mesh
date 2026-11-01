@@ -1,20 +1,40 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-11-01
+
+### Added
+
+- Epoch AI "Capabilities & benchmarking" as a fourth, keyless market source (`epoch.ai/data/benchmark_data.zip`, CC BY 4.0). The archive is read with `zipfile`, only for the configured benchmark CSVs, with a 25 MB response cap, an 80 MB expanded cap, `..`/absolute-path rejection and same-host redirects. Each benchmark yields a percentile inside a 540-day reference window; the reasoning and coding axes are averaged, an axis with fewer than three scored benchmarks stays empty, and `intelligence_source` gains `epoch_ai`. The default cache lifetime is twelve hours. `hmesh market show` prints the required attribution and every routing decision carries it in `attribution`.
+- `routing.axis_weights`: `plan`/`audit`/`review` score reasoning 0.7 / coding 0.3, `implement`/`refactor`/`debug`/`test` score coding 0.7 / reasoning 0.3, `docs` scores reasoning 1.0. A model with one axis uses that axis at full weight. Routing decisions now record `axis_scores` and `benchmarks_used`.
+- `hmesh market show --axis reasoning|coding` sorts by and displays one axis, plus the benchmark count, benchmark data date and `intelligence_source`.
+- Hands-off refresh. The MCP server refreshes a missing or expired cache in the background at start-up and on a TTL cadence. The first dispatch with no market data waits at most `market.wait_seconds` (8 s) and then continues with the local tiers; one-shot commands run the same refresh synchronously under the same bound and fall back to the previous snapshot or the heuristic. Failures only log a warning.
+- The controller no longer names a harness or a model. `dispatch_task` over MCP and `hmesh dispatch` default `target_harness` to `auto` and route across every installed harness; the MCP `initialize` response tells clients to send an objective and an optional `task_kind` instead. `TaskRequest.target_harness` defaults to `auto`.
+- Market scores drive discovery. `capability_score`, `assigned_tiers` and the tier map use the matched market intelligence when it exists, and `hmesh models`, `hmesh status`, `list_harnesses` and `hmesh doctor` expose each model's `intelligence`, `intelligence_source` and blended price. `hmesh doctor` adds a read-only `market` row with sources, last refresh, staleness, match rate and unmatched models.
 
 ### Fixed
 
+- Machines with only some harnesses installed. `status`, `models` and `list_harnesses` report a missing harness as `not installed` and no longer list example-config models or tiers for it; `hmesh doctor` ends with `N of 5 harnesses installed`. ZCode returns `skipped: ZCode not found` without writing a plugin when neither the CLI nor the macOS app exists. `initial_harness` is the first runnable harness rather than the first configured one. A `usage limit` / `insufficient_quota` error opens the account-wide circuit, fails over to another harness, and otherwise suspends the ticket in `waiting_for_quota` instead of retrying every model on the same account. With no harness at all, dispatch returns the explicit install hint instead of `no_available_model`.
+- models.dev reseller rows no longer become separate models. Entries fold onto one canonical model per name and the list price comes from the vendor's own entry, then OpenRouter, then the median of the priced offers. A row that prices input and output at zero is unknown, not free. The catalogue drops from thousands of rows to hundreds of models. Rows without a `canonical_model_id` now merge by their normalised model name too; when no canonical model exists they collapse into one `unknown/<name>` entry instead of one entry per reseller. This removes the duplicate `zai/glm-5-3` style candidates that left ten ZCode models unmatched. The example config lists `minimax` and `minimax-cn` as original vendors so the three MiniMax models keep the vendor price.
+- `match_model` resolves several same-name candidates by evidence instead of giving up: an evaluation source (`epoch_ai` or `artificial_analysis`) first, then an OpenRouter or first-party offer, then a non-empty price. A remaining tie still returns `none`. A resolved match reports `confidence: normalized` and a short `note`.
+- `hmesh market show --unmatched` prints only the unmatched harness models and the final attribution. Catalogue rows appear only when `--model` is also given; `--json` keeps the full catalogue and unmatched structures.
+- The default `pytest` run sets `HARNESS_MESH_OFFLINE=1` for child processes, so subprocess CLI and MCP checks never download market data. The two CLI lineage checks no longer wait on the one-shot refresh timeout.
+- `hmesh market show --model` applies the same normalisation as the catalogue (dots and hyphens are equivalent, case-insensitive, globs supported) and reports `no model matches GLOB` instead of claiming the cache is empty. `--unmatched` now reads the discovery ledger and lists harness models with no market match, with `confidence: none` and a `market.aliases` hint; an empty ledger asks for `hmesh models --refresh`.
 - ZCode no longer falls back to its yolo default when approval is withheld (`shared_write` without `auto_approve_shared_write`, or `auto_approve: false`): the adapter passes `--mode build`, configurable to `edit` or `plan` through `restricted_mode`. Measured headless on ZCode 0.17.0: `build` denies writes and shell, `edit` allows writes only, `guarded` allows both.
 - Install output and `hmesh doctor` approval lines are in English, matching the rest of the CLI.
 
 ### Added
 
-- `hmesh install --approve {read,dispatch,all,none}` (default `dispatch`) writes per-tool MCP pre-approvals for Claude Code (`~/.claude/settings.json`), Codex (`~/.codex/config.toml`) and Antigravity (`~/.gemini/config/config.json`). `read` covers the seven read tools, `dispatch` adds the three dispatch tools, `all` covers all thirteen, and `none` writes nothing while removing rules written by this tool. ZCode and DeepSeek Harness need no approval settings.
+- Read-only market data layer: OpenRouter and models.dev list prices, Artificial Analysis intelligence scores, model-id matching with explicit aliases, a six-hour snapshot cache, and `market.enabled` / `HARNESS_MESH_OFFLINE` switches. Every score is labelled `artificial_analysis`, `override` or `heuristic`; a failed refresh keeps the stale snapshot.
+- Task-kind routing (`plan`, `audit`, `review`, `implement`, `refactor`, `debug`, `test`, `docs`, `auto`) with `premium`, `balanced` and `value` tiers, configurable value floors, model pins and soft or strict premium/value hints. Requests can set `task_kind`, `routing_mode`, `max_price_per_mtok` and `min_intelligence`; `HARNESS_MESH_ROUTING` overrides the configured mode.
+- `hmesh market refresh`, `hmesh market show [--unmatched]`, `hmesh route`, `--kind` and `--routing-mode` on `hmesh dispatch`, plus the `get_model_market` and `preview_routing` MCP tools. Every task result carries a `routing` record and the transcript starts with the same block.
+- Background market refresh on MCP server start and on the cache TTL. Failures log a warning and leave dispatch unchanged.
+- `hmesh install --approve {read,dispatch,all,none}` (default `dispatch`) writes per-tool MCP pre-approvals for Claude Code (`~/.claude/settings.json`), Codex (`~/.codex/config.toml`) and Antigravity (`~/.gemini/config/config.json`). `read` covers the nine read tools, `dispatch` adds the three dispatch tools, `all` covers all fifteen, and `none` writes nothing while removing rules written by this tool. ZCode and DeepSeek Harness need no approval settings.
 - `hmesh doctor` reports approved and missing tools against the default `dispatch` level without changing files.
 
 ### Changed
 
 - The install epilogue states the level and number of pre-approved tools instead of printing the old service-wide Codex and Antigravity hint.
+- MCP now exposes 15 tools: 9 read, 3 dispatch and 3 write. `hmesh install --approve read` writes 9 rules, the default `dispatch` level 12, and `all` 15.
 
 ## 0.3.1 — 2026-11-01
 

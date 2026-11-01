@@ -180,16 +180,33 @@ CREATE TABLE IF NOT EXISTS resources (
     updated_at REAL NOT NULL,
     PRIMARY KEY (task_id, resource)
 );
+
+CREATE TABLE IF NOT EXISTS market_snapshots (
+    source TEXT PRIMARY KEY,
+    fetched_at REAL NOT NULL,
+    payload TEXT NOT NULL
+);
 """
 
 
 class StateStore:
     """Thread-safe SQLite ledger used by the router, quota guardian and MCP."""
 
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, *, read_only: bool = False):
         self.path = Path(db_path).expanduser()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.read_only = read_only
         self._lock = threading.RLock()
+        if read_only:
+            # ``hmesh doctor`` inspects the ledger without creating, migrating
+            # or touching WAL files.  A missing database is simply "empty".
+            if not self.path.exists():
+                raise FileNotFoundError(self.path)
+            self._conn = sqlite3.connect(
+                f"file:{self.path}?mode=ro", uri=True, check_same_thread=False, timeout=30
+            )
+            self._conn.row_factory = sqlite3.Row
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False, timeout=30)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -229,7 +246,8 @@ class StateStore:
     def close(self) -> None:
         with self._lock:
             try:
-                self._conn.commit()
+                if not self.read_only:
+                    self._conn.commit()
             finally:
                 self._conn.close()
 
@@ -1159,6 +1177,52 @@ class StateStore:
                 "SELECT resource FROM resources WHERE task_id=? ORDER BY resource", (task_id,)
             ).fetchall()
         return [row["resource"] for row in rows]
+
+    # ------------------------------------------------------------------
+    # market snapshots
+    # ------------------------------------------------------------------
+    def save_market_snapshot(self, source: str, fetched_at: float, payload: Any) -> None:
+        """Persist one provider snapshot; ``payload`` is stored as JSON text."""
+
+        encoded = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+        self._execute(
+            "INSERT INTO market_snapshots (source, fetched_at, payload) VALUES (?, ?, ?) "
+            "ON CONFLICT(source) DO UPDATE SET fetched_at=excluded.fetched_at, payload=excluded.payload",
+            (str(source), float(fetched_at), encoded),
+        )
+
+    def get_market_snapshot(self, source: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT source, fetched_at, payload FROM market_snapshots WHERE source=?",
+                (str(source),),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload"])
+        except json.JSONDecodeError:
+            return None
+        return {"source": row["source"], "fetched_at": float(row["fetched_at"]), "payload": payload}
+
+    def list_market_snapshots(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT source, fetched_at, payload FROM market_snapshots ORDER BY source"
+            ).fetchall()
+        snapshots: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except json.JSONDecodeError:
+                payload = None
+            snapshots.append(
+                {"source": row["source"], "fetched_at": float(row["fetched_at"]), "payload": payload}
+            )
+        return snapshots
+
+    def delete_market_snapshot(self, source: str) -> None:
+        self._execute("DELETE FROM market_snapshots WHERE source=?", (str(source),))
 
     # ------------------------------------------------------------------
     # waiting queue helpers

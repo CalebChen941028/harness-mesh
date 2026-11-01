@@ -123,14 +123,14 @@ def test_claude_writes_approvals_and_preserves_unrelated_settings(tmp_path):
     allow = payload["permissions"]["allow"]
     assert "Bash(ls)" in allow
     assert "mcp__other__tool" in allow
-    assert len(_managed(allow, CLAUDE_PREFIX)) == 10
+    assert len(_managed(allow, CLAUDE_PREFIX)) == 12
     assert "mcp__harness-mesh__dispatch_task" in allow
     assert "mcp__harness-mesh__apply_task_patch" not in allow
     assert _claude_path(home).stat().st_mode & 0o777 == 0o640
     backup = _claude_path(home).with_name("settings.json.harness-mesh.bak")
     assert backup.read_text(encoding="utf-8") == json.dumps(settings, indent=2) + "\n"
     assert result.approvals["status"] == "applied"
-    assert len(result.approvals["tools"]) == 10
+    assert len(result.approvals["tools"]) == 12
 
 
 def test_claude_reinstall_is_idempotent_and_keeps_first_backup(tmp_path):
@@ -145,7 +145,7 @@ def test_claude_reinstall_is_idempotent_and_keeps_first_backup(tmp_path):
     first = _claude_path(home).read_text(encoding="utf-8")
     installer.install(["claude_code"])
     assert _claude_path(home).read_text(encoding="utf-8") == first
-    assert len(_managed(_claude_allow(home), CLAUDE_PREFIX)) == 10
+    assert len(_managed(_claude_allow(home), CLAUDE_PREFIX)) == 12
     backup = _claude_path(home).with_name("settings.json.harness-mesh.bak")
     assert backup.read_text(encoding="utf-8") == json.dumps(settings) + "\n"
 
@@ -153,18 +153,18 @@ def test_claude_reinstall_is_idempotent_and_keeps_first_backup(tmp_path):
 def test_claude_approval_levels_raise_lower_and_clear(tmp_path):
     installer, home, _ = _installer(tmp_path, level="read")
     installer.install(["claude_code"])
-    assert len(_managed(_claude_allow(home), CLAUDE_PREFIX)) == 7
+    assert len(_managed(_claude_allow(home), CLAUDE_PREFIX)) == 9
     assert "mcp__harness-mesh__dispatch_task" not in _claude_allow(home)
 
     installer.approval_level = "all"
     installer.install(["claude_code"])
-    assert len(_managed(_claude_allow(home), CLAUDE_PREFIX)) == 13
+    assert len(_managed(_claude_allow(home), CLAUDE_PREFIX)) == 15
     assert "mcp__harness-mesh__apply_task_patch" in _claude_allow(home)
 
     installer.approval_level = "read"
     installer.install(["claude_code"])
     allow = _claude_allow(home)
-    assert len(_managed(allow, CLAUDE_PREFIX)) == 7
+    assert len(_managed(allow, CLAUDE_PREFIX)) == 9
     assert "mcp__harness-mesh__apply_task_patch" not in allow
     assert "mcp__harness-mesh__dispatch_task" not in allow
 
@@ -198,7 +198,7 @@ def test_claude_creates_missing_settings_file(tmp_path):
     installer, home, _ = _installer(tmp_path)
     result = installer.install(["claude_code"])[0]
     assert result.action == "installed"
-    assert len(_managed(_claude_allow(home), CLAUDE_PREFIX)) == 10
+    assert len(_managed(_claude_allow(home), CLAUDE_PREFIX)) == 12
     assert not _claude_path(home).with_name("settings.json.harness-mesh.bak").exists()
 
 
@@ -233,7 +233,7 @@ def test_claude_dry_run_lists_entries_without_writing(tmp_path):
     result = installer.install(["claude_code"])[0]
     assert result.action == "would_install"
     assert result.approvals["status"] == "planned"
-    assert len(result.approvals["entries"]) == 10
+    assert len(result.approvals["entries"]) == 12
     assert str(_claude_path(home)) in result.approvals["files"]
     assert _claude_path(home).read_text(encoding="utf-8") == original
     assert not _claude_path(home).with_name("settings.json.harness-mesh.bak").exists()
@@ -269,7 +269,7 @@ def test_antigravity_writes_approvals_and_preserves_other_keys(tmp_path):
     allow = written["userSettings"]["globalPermissionGrants"]["allow"]
     assert "write_file(/Users/me/AGENTS.md)" in allow
     assert "mcp(other/tool)" in allow
-    assert len(_managed(allow, AGY_PREFIX)) == 10
+    assert len(_managed(allow, AGY_PREFIX)) == 12
     assert "mcp(harness-mesh/dispatch_task)" in allow
     assert "mcp(harness-mesh/apply_task_patch)" not in allow
     assert _agy_path(home).stat().st_mode & 0o777 == 0o600
@@ -282,7 +282,7 @@ def test_antigravity_creates_missing_containers(tmp_path):
     result = installer.install(["antigravity"])[0]
     assert result.action == "installed"
     allow = _agy_allow(home)
-    assert len(_managed(allow, AGY_PREFIX)) == 7
+    assert len(_managed(allow, AGY_PREFIX)) == 9
 
 
 def test_antigravity_reinstall_is_idempotent(tmp_path):
@@ -291,17 +291,17 @@ def test_antigravity_reinstall_is_idempotent(tmp_path):
     first = _agy_path(home).read_text(encoding="utf-8")
     installer.install(["antigravity"])
     assert _agy_path(home).read_text(encoding="utf-8") == first
-    assert len(_managed(_agy_allow(home), AGY_PREFIX)) == 10
+    assert len(_managed(_agy_allow(home), AGY_PREFIX)) == 12
 
 
 def test_antigravity_levels_none_and_uninstall_clear_only_managed(tmp_path):
     installer, home, _ = _installer(tmp_path, level="all")
     installer.install(["antigravity"])
-    assert len(_managed(_agy_allow(home), AGY_PREFIX)) == 13
+    assert len(_managed(_agy_allow(home), AGY_PREFIX)) == 15
 
     installer.approval_level = "read"
     installer.install(["antigravity"])
-    assert len(_managed(_agy_allow(home), AGY_PREFIX)) == 7
+    assert len(_managed(_agy_allow(home), AGY_PREFIX)) == 9
 
     installer.approval_level = "none"
     installer.install(["antigravity"])
@@ -336,7 +336,7 @@ def test_antigravity_dry_run_does_not_write(tmp_path):
     installer, home, _ = _installer(tmp_path, dry_run=True)
     result = installer.install(["antigravity"])[0]
     assert result.action == "would_install"
-    assert len(result.approvals["entries"]) == 10
+    assert len(result.approvals["entries"]) == 12
     assert not _agy_path(home).exists()
 
 
@@ -369,7 +369,7 @@ def test_codex_writes_managed_block_and_preserves_unrelated_toml(tmp_path):
     assert parsed["profiles"]["fast"]["model"] == "gpt-5-mini"
     assert parsed["mcp_servers"]["harness-mesh"]["command"] == "/old/python"
     tools = parsed["mcp_servers"]["harness-mesh"]["tools"]
-    assert len(tools) == 10
+    assert len(tools) == 12
     assert tools["dispatch_task"]["approval_mode"] == "approve"
     assert "apply_task_patch" not in tools
     assert _codex_path(home).stat().st_mode & 0o777 == 0o640
@@ -385,7 +385,7 @@ def test_codex_reinstall_is_idempotent(tmp_path):
     assert _codex_path(home).read_text(encoding="utf-8") == first
     assert first.count(CODEX_APPROVAL_BLOCK_START) == 1
     parsed = tomllib.loads(first)
-    assert len(parsed["mcp_servers"]["harness-mesh"]["tools"]) == 10
+    assert len(parsed["mcp_servers"]["harness-mesh"]["tools"]) == 12
 
 
 def test_codex_removes_block_before_cli_calls_and_appends_after(tmp_path):
@@ -424,12 +424,12 @@ def test_codex_levels_none_and_uninstall_clear_managed_block(tmp_path):
     installer, home, _ = _installer(tmp_path, level="all")
     installer.install(["codex"])
     parsed = tomllib.loads(_codex_path(home).read_text(encoding="utf-8"))
-    assert len(parsed["mcp_servers"]["harness-mesh"]["tools"]) == 13
+    assert len(parsed["mcp_servers"]["harness-mesh"]["tools"]) == 15
 
     installer.approval_level = "read"
     installer.install(["codex"])
     parsed = tomllib.loads(_codex_path(home).read_text(encoding="utf-8"))
-    assert len(parsed["mcp_servers"]["harness-mesh"]["tools"]) == 7
+    assert len(parsed["mcp_servers"]["harness-mesh"]["tools"]) == 9
 
     installer.approval_level = "none"
     installer.install(["codex"])
@@ -475,7 +475,7 @@ def test_codex_dry_run_does_not_write(tmp_path):
     result = installer.install(["codex"])[0]
     assert result.action == "would_install"
     assert result.approvals["status"] == "planned"
-    assert len(result.approvals["entries"]) == 10
+    assert len(result.approvals["entries"]) == 12
     assert _codex_path(home).read_text(encoding="utf-8") == original
     assert not _codex_path(home).with_name("config.toml.harness-mesh.bak").exists()
 
@@ -534,6 +534,6 @@ def test_codex_service_wide_approval_counts_as_full_coverage(tmp_path):
     installer, home, _ = _installer(tmp_path, home=home)
 
     report = installer.approval_report("codex")
-    assert report["approved"] == 10
+    assert report["approved"] == 12
     assert report["missing"] == []
-    assert len(report["tools"]) == 13
+    assert len(report["tools"]) == 15

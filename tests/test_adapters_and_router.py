@@ -1156,18 +1156,21 @@ async def test_cancel_task_kills_the_child_harness_process(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_mcp_server_registers_thirteen_tools(tmp_path):
+async def test_mcp_server_registers_fifteen_tools(tmp_path):
     mesh = make_mesh(tmp_path)
     try:
         server = create_server(mesh.router)
         tools = await server.list_tools()
         names = {tool.name for tool in tools}
         assert names == set(TOOL_NAMES)
-        assert len(names) == 13
+        assert len(names) == 15
 
         by_name = {tool.name: tool for tool in tools}
         dispatch_schema = by_name["dispatch_task"].inputSchema
-        assert {"objective", "target_harness"} <= set(dispatch_schema["required"])
+        # The controller only has to name an outcome; the mesh picks the rest.
+        assert "objective" in dispatch_schema["required"]
+        assert "target_harness" not in dispatch_schema["required"]
+        assert "target_harness" in dispatch_schema["properties"]
         assert {
             "difficulty",
             "on_quota_exhausted",
@@ -1282,10 +1285,15 @@ def test_cli_status_models_quota_and_skills_commands(tmp_path):
     write_claude_settings(home, model="claude-opus-9")
     init_git_repo(workspace, {"README.md": "cli fixture\n"})
     config_path = Path(__file__).resolve().parents[1] / "config" / "harnesses.example.yaml"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_claude = bin_dir / "claude"
+    fake_claude.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_claude.chmod(0o755)
     env = {
         "HOME": str(home),
         "DSH_HOME": str(home / ".dsh"),
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
         "HARNESS_MESH_DISABLE_SYSTEM_BINARIES": "1",
     }
     runner = CliRunner()

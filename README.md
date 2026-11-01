@@ -10,7 +10,7 @@ Harness-Mesh is a **local orchestration layer**, shipped as:
 
 - a Python package (`harness_mesh`) with a typed data model and SQLite ledger;
 - a CLI, `hmesh`, for status, model discovery, dispatch, context and patches;
-- an stdio MCP server, `hmesh-mcp`, exposing 13 tools to a controller harness;
+- an stdio MCP server, `hmesh-mcp`, exposing 15 tools to a controller harness;
 - a local runtime directory, `.harness-mesh/`, holding state, worktrees and paged resources.
 
 It does not provide a model, a hosted service, a web UI or a multi-user scheduler. It orchestrates the harness CLIs you already have installed and authenticated on the machine. Prompts and code are sent to those CLIs; the mesh process itself keeps a local ledger and bounded summaries.
@@ -28,7 +28,7 @@ It is not a replacement for a harness's permission model, sandbox, or vendor ter
 | In scope | Out of scope |
 | :--- | :--- |
 | Dynamic discovery of locally authorised models from configuration, environment, live model endpoints and CLI enumeration | Maintaining a fixed or hosted model catalogue |
-| Four-tier difficulty routing (`low` → `critical`) and skill/plugin injection | Training or hosting models |
+| Difficulty tiers plus market-aware routing by task kind, and skill/plugin injection | Training or hosting models |
 | Ticket/Assignment failover on quota exhaustion, unauthorised models, credential failures and transient errors | Multi-tenant authentication, RBAC or billing |
 | Git worktree isolation, dirty-workspace sync, dependency pre-apply and explicit patch application | Merging worktrees automatically without review |
 | Shared project instructions, a cross-harness memory blackboard and dependency context | Uploading project data to a remote service |
@@ -83,7 +83,7 @@ Useful options:
 ```bash
 hmesh install --dry-run                 # print planned commands/files, change nothing
 hmesh install --yes                     # non-interactive install
-hmesh install --approve read            # pre-approve 7 read-only MCP tools
+hmesh install --approve read            # pre-approve 9 read-only MCP tools
 hmesh install --harness zcode           # one harness only (repeatable)
 hmesh install --workspace /path/project # pin the MCP workspace explicitly
 hmesh install --uninstall               # remove integrations
@@ -96,13 +96,13 @@ Without `--dry-run`, `hmesh install` prints the planned files and commands and a
 Interactive sessions ask before an MCP tool runs. Headless commands such as `codex exec` and `agy -p` cannot answer that prompt, so `hmesh install` writes per-tool allow rules:
 
 ```bash
-hmesh install --approve dispatch   # default: 10 read and dispatch tools
-hmesh install --approve read       # 7 read-only tools
-hmesh install --approve all        # all 13 tools
+hmesh install --approve dispatch   # default: 12 read and dispatch tools
+hmesh install --approve read       # 9 read-only tools
+hmesh install --approve all        # all 15 tools
 hmesh install --approve none       # write nothing and remove rules written by hmesh
 ```
 
-`dispatch`, the default, approves the seven read tools plus `dispatch_task`, `parallel_dispatch` and `cancel_task`. Dispatched work runs in an isolated worktree; its changes reach the primary checkout only through `apply_task_patch`. The three write tools stay manual: `apply_task_patch`, `report_quota_status` and `update_project_context` change the primary workspace or shared state. Pass `--approve all` to pre-approve them too.
+`dispatch`, the default, approves the nine read tools plus `dispatch_task`, `parallel_dispatch` and `cancel_task`. Dispatched work runs in an isolated worktree; its changes reach the primary checkout only through `apply_task_patch`. The three write tools stay manual: `apply_task_patch`, `report_quota_status` and `update_project_context` change the primary workspace or shared state. Pass `--approve all` to pre-approve them too.
 
 | Harness | File | Rule |
 | :--- | :--- | :--- |
@@ -125,11 +125,16 @@ Restart the desktop application after installation and start a new chat/task. Ex
 # Discover installed harnesses, real CLI versions and authorised models.
 hmesh status
 
-# Force the three-layer model discovery and the four-tier mapping.
+# Force the three-layer model discovery and the tier mapping.
 hmesh models --refresh
 
 # Inspect quota circuits and waiting tickets.
 hmesh quota --probe
+
+# Fetch market prices and evaluation scores, then preview a route.
+hmesh market refresh
+hmesh market show --unmatched
+hmesh route --objective "Design the migration plan" --kind plan
 
 # List indexed SKILL.md files and MCP/plugin manifests.
 hmesh skills
@@ -153,13 +158,13 @@ hmesh apply <task_id> --strategy copy --force-copy
 hmesh doctor
 ```
 
-Start the MCP server with background recovery and effects consumption (the default):
+Start the MCP server with background recovery, effects consumption and market refresh (the default):
 
 ```bash
 hmesh-mcp
 ```
 
-Disable background workers for a pure request/response server:
+Disable every background worker for a pure request/response server:
 
 ```bash
 hmesh-mcp --no-monitor
@@ -220,12 +225,81 @@ These blocks are project data, not instructions that override the ticket objecti
 
 `TaskRequest.session_id` flows through MCP and `AdapterCall`. Adapters map it to `--resume` (Claude/ZCode), `codex exec resume <id>`, `--session-id` (DSH) or `--conversation` (Antigravity). Write-mode templates inject each CLI's approval bypass; read-only tickets use plan/read-only modes and run in a disposable worktree.
 
-## MCP tools (13)
+## Market data and model routing
+
+The mesh can rank models by published price and evaluation score instead of relying only on the four difficulty tiers. The data layer is read-only and separate from dispatch.
+
+### Sources
+
+| Source | Authentication | Fields used |
+| :--- | :--- | :--- |
+| OpenRouter `/api/v1/models` | none | list price per token, context window, reasoning and tool flags |
+| models.dev `/api.json` | none | list price per million tokens, context window, release date |
+| Epoch AI `benchmark_data.zip` | none | reasoning and coding benchmark percentiles, benchmark dates |
+| Artificial Analysis `/api/v2/language/models/free` | `ARTIFICIAL_ANALYSIS_API_KEY` | intelligence index, list price, output speed |
+
+models.dev lists the same model once per provider, including hundreds of resale gateways. Those rows fold onto one canonical model per name. The price comes from the model vendor's own entry (listed in `market.first_party_providers`), then from OpenRouter, then from the median of every priced offer. An entry that prices input and output at zero counts as unknown, not free.
+
+Epoch AI publishes the CC BY 4.0 ["Capabilities & benchmarking"](https://epoch.ai/benchmarks) archive and needs no key, so it is the default evaluation source. Each benchmark contributes one percentile computed inside a 540-day reference window (`market.epoch.reference_window_days`); an axis with fewer than three scored benchmarks stays empty (`market.epoch.min_benchmarks`). The two axes are `intelligence_reasoning` and `intelligence_coding`, and `intelligence` is the equal-weight mean of the axes a model has. Artificial Analysis takes precedence when `ARTIFICIAL_ANALYSIS_API_KEY` is set. Without either source the mesh computes a labelled heuristic from the existing discovery score, the price percentile, the reasoning flag and the release date.
+
+The heuristic is not an evaluation. Every score carries `intelligence_source`: `epoch_ai`, `artificial_analysis`, `override` or `heuristic`. `hmesh market show` and the `get_model_market` MCP tool print that field.
+
+Epoch AI data is CC BY 4.0 and requires attribution. `hmesh market show` ends with `Benchmark data: Epoch AI, 'Capabilities & benchmarking', https://epoch.ai/benchmarks (CC BY 4.0)`; `--json` carries the same string in `attribution`, and every routing decision includes it.
+
+`hmesh market refresh` writes a snapshot to `.harness-mesh/state.db`. The default lifetime is six hours. Epoch AI and Artificial Analysis are cached for at least twelve hours; Artificial Analysis is also limited to 20 requests per process per day. A failed refresh keeps the previous snapshot and marks it stale. Cached data older than seven days still works and is flagged expired.
+
+`market.enabled: false` or `HARNESS_MESH_OFFLINE=1` stops every outbound request.
+
+### Hands-off refresh
+
+The cache stays current without a manual step. The MCP server refreshes in the background at start-up when a source is missing or past its TTL, then on a TTL cadence. The first dispatch that finds no market data at all waits at most `market.wait_seconds` (8 s) and then continues with the local tiers while the refresh finishes in the background. One-shot commands (`dispatch`, `route`, `status`, `models`, `market show`) run the same refresh synchronously under the same 8 s bound and fall back to the previous snapshot or the heuristic when a source is slow or down. A failed refresh only logs a warning.
+
+The controller sends an objective, nothing else. `dispatch_task` over MCP and `hmesh dispatch` default `target_harness` to `auto`, so the mesh routes across every installed harness and picks the model. The MCP `initialize` response states the same rule to every client. Passing `model` or `target_harness` explicitly keeps the previous behaviour.
+
+On a machine with only some of the five harnesses, `hmesh status`, `hmesh models` and `list_harnesses` report a missing harness as `not installed` with the reason and leave its models and tier map empty; `hmesh doctor` ends with `N of 5 harnesses installed`. `hmesh install --dry-run` returns `skipped` for a missing binary, and ZCode is skipped as `ZCode not found` without writing a plugin when neither its CLI nor its app is present.
+
+The market score also drives discovery: when a harness model matches the catalogue, its `capability_score`, `assigned_tiers` and tier map come from the market intelligence instead of the local heuristic. `hmesh models`, `hmesh status` and `list_harnesses` show each model's `intelligence`, `intelligence_source` and blended price, so the tier a user reads, the model dispatch picks and the route preview agree. `hmesh doctor` adds a read-only `market` row with the sources, the last successful refresh, staleness, the match rate and the unmatched models.
+
+### Task kinds and tiers
+
+`task_kind` is `plan`, `audit`, `review`, `implement`, `refactor`, `debug`, `test`, `docs` or `auto`. `auto` reads the objective (Chinese and English keywords) and otherwise follows `evaluate_difficulty`.
+
+| Tier | Task kinds and difficulty | Rule |
+| :--- | :--- | :--- |
+| `premium` | `plan`, `audit`, `review`, or `critical` | highest intelligence; ties go to the lower blended price |
+| `balanced` | `refactor`, `debug`, or `high` | highest intelligence per blended dollar among candidates at or above 85% of the best score |
+| `value` | `implement`, `test`, `docs`, or `low`/`medium` | cheapest candidate at or above a difficulty floor (0.55 for low, 0.70 for medium) |
+
+`blended_price = (3 * input + output) / 4` in USD per million tokens. A model with no known price is left out of price comparisons and used only when nothing else qualifies.
+
+`routing.axis_weights` decides which evaluation axis a task kind is scored on: `plan`, `audit` and `review` use reasoning 0.7 / coding 0.3; `implement`, `refactor`, `debug` and `test` use coding 0.7 / reasoning 0.3; `docs` uses reasoning 1.0. When a model has only one axis, that axis carries full weight.
+
+Claude Code and Codex bill through a subscription quota rather than per token. The router uses the API list price as a proxy for quota consumption and states that in every decision record.
+
+### Routing modes
+
+`routing.mode` defaults to `auto`. `manual` keeps the model you pass; `off` uses the four difficulty tiers. `HARNESS_MESH_ROUTING` overrides the configured default, and a request-level `routing_mode` wins over both.
+
+`routing.pins` fixes `{harness, model}` for one task kind. `routing.premium_hints` and `routing.value_hints` add weight to matching models; `routing.strict_hints: true` turns them into a hard filter. The example configuration uses exact `glm-5.3`, so it does not match `glm-5.3-flash`.
+
+When no market snapshot exists, no harness model matches the catalogue, or the planner returns no choice, dispatch falls back to `discovery.resolve_model(harness, difficulty)`. The decision record keeps the reason.
+
+### Decision record
+
+Every result carries a `routing` object: mode, task kind, tier, chosen harness/model/effort, intelligence and its source, `axis_scores` (both axis scores with the weights used), `benchmarks_used`, the attribution string, list prices, the top three alternatives with scores, the data sources, `fetched_at`, `stale`, `expired` and the match confidence. The same block appears at the top of the transcript.
+
+### Not connected
+
+The Aider polyglot leaderboard has no data after 2025-10. The community LMArena snapshot (`oolong-tea-2026/arena-ai-leaderboards`) has returned empty `leaderboards` every day since 2026-10-20. `api.llm-stats.com` returns vendor-reported scores marked `verified: false`, only four models carry an AA-Index, and its terms page returns 404. None of the three is used.
+
+## MCP tools (15)
 
 | Tool | Purpose |
 | :--- | :--- |
 | `list_harnesses` | Installed harnesses, real binary, version, authorised models, tier map and quota state |
 | `discover_harness_models` | Force three-layer discovery for one or all harnesses |
+| `get_model_market` | Read cached list prices, context windows and intelligence scores; `intelligence_source` names the source |
+| `preview_routing` | Rank a task without dispatching: task kind, tier, chosen model and alternatives |
 | `list_skills_and_plugins` | Search indexed `SKILL.md` files and MCP/plugin manifests |
 | `dispatch_task` | Create a ticket, choose a model and run assignments with failover |
 | `parallel_dispatch` | Dispatch several tickets concurrently |
@@ -246,8 +320,11 @@ hmesh doctor [--harness H] [--json]
 hmesh status [--refresh] [--json]
 hmesh models [--refresh] [--harness H]
 hmesh quota [--probe]
+hmesh route --objective O [--kind K] [--difficulty D] [--harness H] [--json]
+hmesh market refresh [--source S]... [--json]
+hmesh market show [--model GLOB] [--axis reasoning|coding] [--unmatched] [--json]
 hmesh skills [--query Q]
-hmesh dispatch --harness H --objective O [--difficulty D] [--fallback H]...
+hmesh dispatch --objective O [--harness H] [--difficulty D] [--kind K] [--routing-mode M] [--fallback H]...
 hmesh tasks [--status S]
 hmesh read <task_id> [diff|transcript|assignments] [--offset N] [--limit N]
 hmesh apply <task_id> [--strategy patch|merge|copy] [--force-copy]
@@ -278,6 +355,23 @@ Key settings:
 | `max_failover_attempts` | `4` | Maximum failovers per ticket |
 | `quota_probe_interval_seconds` | `60` | Background recovery probe interval |
 | `difficulty_timeout_seconds` | `600/1200/1800/3600` | Per-tier assignment timeout |
+| `market.enabled` | `true` | Read-only market data and its snapshot cache |
+| `market.ttl_seconds` | `21600` | Snapshot lifetime for OpenRouter and models.dev |
+| `market.wait_seconds` | `8` | Longest automatic refresh before dispatch or a command continues |
+| `market.sources` | four sources | Providers to refresh |
+| `market.first_party_providers` | `[]` (the example config lists twelve) | Vendors whose own models.dev entry sets the list price |
+| `market.epoch.reasoning_benchmarks` | six benchmarks | Benchmarks that feed the reasoning axis |
+| `market.epoch.coding_benchmarks` | nine benchmarks | Benchmarks that feed the coding axis |
+| `market.epoch.reference_window_days` | `540` | Percentile window before a benchmark's latest release |
+| `market.epoch.min_benchmarks` | `3` | Minimum scored benchmarks before an axis counts |
+| `market.aliases` | `{}` | Map a harness model id or glob to a market key |
+| `market.overrides` | `{}` | Glob-keyed intelligence and price overrides |
+| `routing.mode` | `auto` | `auto`, `manual` or `off`; `HARNESS_MESH_ROUTING` wins |
+| `routing.floors` | `0.55/0.70` | Value-tier intelligence floor by difficulty |
+| `routing.axis_weights` | per task kind | Reasoning/coding weights used to score a task |
+| `routing.premium_hints` / `routing.value_hints` | `[]` | Model globs weighted per tier |
+| `routing.strict_hints` | `false` | Turn hint weighting into a filter |
+| `routing.pins` | `{}` | Fixed harness/model per task kind |
 
 ## Testing
 
@@ -287,7 +381,7 @@ Key settings:
 .venv/bin/pytest -v
 ```
 
-The fast suite uses mocked adapters and temporary Git repositories. `tests/test_local_machine_harnesses.py` additionally exercises the real locally installed harnesses when the macOS bundles are present; it asserts real binary resolution, real model inventories, and a real DeepSeek ticket that creates a file in a worktree and applies it back. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow.
+The fast suite uses mocked adapters, temporary Git repositories, `httpx.MockTransport` market providers and cached snapshots. It opens no sockets. Live HTTP checks live in `tests/test_real_machine_market.py` and run only with `HARNESS_MESH_REAL_MACHINE=1`; the Artificial Analysis branch also needs `ARTIFICIAL_ANALYSIS_API_KEY`. `tests/test_local_machine_harnesses.py` additionally exercises the real locally installed harnesses when the macOS bundles are present; it asserts real binary resolution, real model inventories, and a real DeepSeek ticket that creates a file in a worktree and applies it back. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow.
 
 ## Operational notes
 

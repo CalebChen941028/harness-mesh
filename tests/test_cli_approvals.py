@@ -49,7 +49,7 @@ def _claude_allow(home: Path) -> list[str]:
     return payload["permissions"]["allow"]
 
 
-def test_install_approve_read_writes_seven_rules(tmp_path):
+def test_install_approve_read_writes_nine_rules(tmp_path):
     result = _invoke(
         tmp_path,
         "install",
@@ -61,12 +61,12 @@ def test_install_approve_read_writes_seven_rules(tmp_path):
     )
     output = _plain(result.output)
     assert result.exit_code == 0, output
-    assert "approvals: level=read tools=7 status=applied" in output
+    assert "approvals: level=read tools=9 status=applied" in output
     allow = _claude_allow(tmp_path / "home")
-    assert len([entry for entry in allow if entry.startswith("mcp__harness-mesh__")]) == 7
+    assert len([entry for entry in allow if entry.startswith("mcp__harness-mesh__")]) == 9
 
 
-def test_install_approve_all_writes_thirteen_rules_and_json(tmp_path):
+def test_install_approve_all_writes_fifteen_rules_and_json(tmp_path):
     result = _invoke(
         tmp_path,
         "install",
@@ -82,9 +82,9 @@ def test_install_approve_all_writes_thirteen_rules_and_json(tmp_path):
     approval = payload[0]["approvals"]
     assert approval["level"] == "all"
     assert approval["status"] == "applied"
-    assert len(approval["tools"]) == 13
+    assert len(approval["tools"]) == 15
     assert approval["files"] == [str(tmp_path / "home" / ".claude" / "settings.json")]
-    assert len([e for e in _claude_allow(tmp_path / "home") if e.startswith("mcp__harness-mesh__")]) == 13
+    assert len([e for e in _claude_allow(tmp_path / "home") if e.startswith("mcp__harness-mesh__")]) == 15
 
 
 def test_install_approve_none_clears_previous_rules(tmp_path):
@@ -130,7 +130,7 @@ def test_install_dry_run_lists_approval_count_entries_and_file(tmp_path):
     )
     output = _plain(result.output)
     assert result.exit_code == 0, output
-    assert "approvals: level=dispatch tools=10 status=planned" in output
+    assert "approvals: level=dispatch tools=12 status=planned" in output
     assert "mcp__harness-mesh__dispatch_task" in output
     assert str(tmp_path / "home" / ".claude" / "settings.json") in output
     assert not (tmp_path / "home" / ".claude" / "settings.json").exists()
@@ -150,7 +150,7 @@ def test_doctor_reports_approved_and_missing_tools(tmp_path):
     result = _invoke(tmp_path, "doctor", "--harness", "claude_code")
     output = _plain(result.output)
     assert result.exit_code == 0, output
-    assert "approvals: 7/10 approved" in output
+    assert "approvals: 9/12 approved" in output
     assert "missing: dispatch_task, parallel_dispatch, cancel_task" in output
 
 
@@ -160,9 +160,9 @@ def test_doctor_json_contains_the_approval_report(tmp_path):
     payload = json.loads(result.output)
     approval = payload[0]["approvals"]
     assert approval["level"] == "dispatch"
-    assert approval["required"] == 10
+    assert approval["required"] == 12
     assert approval["approved"] == 0
-    assert len(approval["missing"]) == 10
+    assert len(approval["missing"]) == 12
     assert not (tmp_path / "home" / ".claude" / "settings.json").exists()
 
 
@@ -180,5 +180,5 @@ def test_doctor_counts_coverage_against_the_default_level(tmp_path):
     result = _invoke(tmp_path, "doctor", "--harness", "claude_code")
     output = _plain(result.output)
     assert result.exit_code == 0, output
-    assert "approvals: 10/10 approved" in output
+    assert "approvals: 12/12 approved" in output
     assert "missing: none" in output

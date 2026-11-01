@@ -1,0 +1,28 @@
+Model version,Agent,Accuracy mean,Release date,Organization
+gpt-5.5_unknown,NexAU-AHE,0.847191011236,2026-04-23,OpenAI
+gpt-5.5_unknown,Capy,0.8314606741570001,2026-04-23,OpenAI
+gpt-5.5_unknown,Codex CLI,0.822471910112,2026-04-23,OpenAI
+gpt-5.5_unknown,Codex,0.8200000000000001,2026-04-23,OpenAI
+claude-opus-4-7_unknown,WOZCODE,0.8022471910110001,2026-04-16,Anthropic
+claude-opus-4-6_unknown,ForgeCode,0.798,2026-02-05,Anthropic
+claude-opus-4-6_unknown,Meta-Harness,0.76404494382,2026-02-05,Anthropic
+claude-opus-4-6_unknown,Capy,0.752808988764,2026-02-05,Anthropic
+claude-opus-4-6_unknown,Terminus-KIRA,0.747191011236,2026-02-05,Anthropic
+claude-opus-4-6_unknown,MAYA-V2,0.7207865168540001,2026-02-05,Anthropic
+claude-opus-4-6_unknown,TongAgents,0.7191011235960001,2026-02-05,Anthropic
+claude-opus-4-6,Droid,0.699,2026-02-05,Anthropic
+claude-opus-4-6_unknown,Droid,0.698876404494,2026-02-05,Anthropic
+claude-opus-4-6_unknown,Crux,0.66872659176,2026-02-05,Anthropic
+claude-opus-4-6_unknown,Mux,0.6651685393260001,2026-02-05,Anthropic
+gpt-5.5_unknown,clnkr,0.660674157303,2026-04-23,OpenAI
+claude-opus-4-6_unknown,Terminus 2,0.629213483146,2026-02-05,Anthropic
+claude-opus-4-6_unknown,Claude Code,0.579775280899,2026-02-05,Anthropic
+claude-sonnet-4-6_unknown,Simplai Agent,0.534269662921,2026-02-17,Anthropic
+claude-sonnet-4-6,Simplai Agent,0.534,2026-02-17,Anthropic
+glm-5,Terminus 2,0.524157303371,2026-02-11,Z.ai (Zhipu AI)
+MiniMax-M2.7,IndusAGI Coding Agent,0.45056179775300004,2026-03-18,MiniMax
+MiniMax-M2.7,Harness Agent,0.42921348314600005,2026-03-18,MiniMax
+MiniMax-M2.5,cchuter,0.42696629213500004,2026-02-12,MiniMax
+MiniMax-M2.5,Terminus 2,0.422471910112,2026-02-12,MiniMax
+glm-4.7,Terminus 2,0.333895131086,2025-12-22,Z.ai (Zhipu AI)
+glm-4.7,Crux,0.33258426966300003,2025-12-22,Z.ai (Zhipu AI)

@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -20,14 +21,25 @@ from .lineage import (
     _resolved_lineage,
     _workspace_from_cwd,
 )
+from .market import (
+    EPOCH_ATTRIBUTION,
+    MarketService,
+    filter_market_models,
+    is_non_model_id,
+    list_unmatched,
+    match_model,
+)
 from .models import (
     QuotaExhaustedPolicy,
+    RoutingMode,
     TaskDifficulty,
+    TaskKind,
     TaskRequest,
     WorkspaceMode,
 )
 from .router import create_mesh_runtime
 from .security import ensure_service_workspace
+from .storage import StateStore
 
 app = typer.Typer(
     add_completion=False,
@@ -36,6 +48,8 @@ app = typer.Typer(
 )
 context_app = typer.Typer(help="Read and update the cross-harness project context blackboard.")
 app.add_typer(context_app, name="context")
+market_app = typer.Typer(help="Inspect and refresh model prices and evaluation scores.")
+app.add_typer(market_app, name="market")
 
 
 def _json(data: Any) -> str:
@@ -75,6 +89,23 @@ def _runtime(ctx: typer.Context):
         raise typer.Exit(code=1) from exc
 
 
+def _ensure_market(runtime) -> None:
+    """Refresh a missing or expired market cache before a one-shot command.
+
+    The wait is bounded by ``market.wait_seconds`` (8 s by default).  A
+    timeout or a failed request leaves the previous snapshot in place and the
+    command continues; it never fails because a third-party site is down.
+    """
+
+    market = getattr(runtime.router, "market", None)
+    if market is None:
+        return
+    try:
+        asyncio.run(market.ensure_fresh())
+    except Exception:
+        pass
+
+
 def _trace_chain_option(raw: str | None) -> list[str] | None:
     """Parse ``--trace-chain`` the same way the MCP tool accepts its list."""
 
@@ -87,6 +118,26 @@ def _trace_chain_option(raw: str | None) -> list[str] | None:
     if isinstance(payload, list):
         return [str(item) for item in payload]
     return None
+
+
+def _task_kind_value(raw: str) -> TaskKind:
+    try:
+        return TaskKind(str(raw).lower())
+    except ValueError as exc:
+        raise typer.BadParameter(
+            "expected one of: " + ", ".join(item.value for item in TaskKind),
+            param_hint="--kind",
+        ) from exc
+
+
+def _routing_mode_value(raw: str) -> RoutingMode:
+    try:
+        return RoutingMode(str(raw).lower())
+    except ValueError as exc:
+        raise typer.BadParameter(
+            "expected one of: " + ", ".join(item.value for item in RoutingMode),
+            param_hint="--routing-mode",
+        ) from exc
 
 
 def _approval_summary(level: str, results) -> str:
@@ -109,6 +160,84 @@ def _approval_summary(level: str, results) -> str:
     return (
         "The selected harnesses need no approval settings; headless runs still need manual "
         "approval for `apply_task_patch` and other write tools. Use `--approve all` to change that."
+    )
+
+
+def _market_doctor_report(config, workspace: str) -> dict[str, Any]:
+    """Read-only market health for ``hmesh doctor`` (never writes a file)."""
+
+    report: dict[str, Any] = {
+        "harness": "market",
+        "sources": [],
+        "last_refresh": None,
+        "stale": None,
+        "models": 0,
+        "matched": 0,
+        "match_rate": None,
+        "unmatched": [],
+        "note": None,
+    }
+    state_db = Path(config.state_path(workspace)) / "state.db"
+    if not state_db.exists():
+        report["note"] = "no market cache yet"
+        return report
+    try:
+        store = StateStore(state_db, read_only=True)
+    except Exception as exc:
+        report["note"] = f"cannot read the ledger: {exc}"
+        return report
+    try:
+        service = MarketService.from_config(config, store)
+        catalog = service.catalog()
+        report["sources"] = list(catalog.sources)
+        report["last_refresh"] = catalog.fetched_at
+        report["stale"] = bool(catalog.stale)
+        if not catalog.models:
+            report["note"] = "no market data cached; run `hmesh market refresh`"
+            return report
+        discovered = [
+            model
+            for model in store.list_discovered_models()
+            if not is_non_model_id(model.model_id)
+        ]
+        missing: list[str] = []
+        matched = 0
+        for model in discovered:
+            found = match_model(
+                model.model_id, catalog.models, aliases=config.market.aliases
+            )
+            if found.key:
+                matched += 1
+            else:
+                missing.append(model.model_id)
+        report["models"] = len(discovered)
+        report["matched"] = matched
+        report["match_rate"] = (
+            round(matched / len(discovered), 3) if discovered else None
+        )
+        report["unmatched"] = missing
+    finally:
+        store.close()
+    return report
+
+
+def _echo_market_doctor(report: dict[str, Any]) -> None:
+    if report.get("note"):
+        typer.echo(f"{'market':14} {'empty':10} {report['note']}")
+        return
+    sources = ", ".join(report.get("sources") or []) or "-"
+    last = report.get("last_refresh")
+    stamp = (
+        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(last)) if last else "-"
+    )
+    rate = report.get("match_rate")
+    rate_text = f"{rate:.0%}" if rate is not None else "-"
+    stale = "yes" if report.get("stale") else "no"
+    unmatched = ", ".join(report.get("unmatched") or []) or "none"
+    typer.echo(
+        f"{'market':14} {'ok':10} sources={sources} last_refresh={stamp} "
+        f"stale={stale} models={report.get('models')} "
+        f"matched={report.get('matched')} ({rate_text}) unmatched={unmatched}"
     )
 
 
@@ -226,6 +355,7 @@ def doctor(
         config_path=config_path or find_config_path(workspace),
     )
     results = installer.doctor(harness)
+    market_report = _market_doctor_report(config, workspace)
     for result in results:
         registration = installer._read_registration(result.harness)
         if registration is None:
@@ -239,7 +369,7 @@ def doctor(
             result.status = "failed"
             result.detail = f"registered workspace is invalid: {exc}"
     if json_output:
-        typer.echo(_json([result.as_dict() for result in results]))
+        typer.echo(_json([result.as_dict() for result in results] + [market_report]))
     else:
         for result in results:
             typer.echo(f"{result.harness:12} {result.status:14} {result.detail}")
@@ -256,6 +386,16 @@ def doctor(
                     f"  approvals: {approvals.get('approved')}/{approvals.get('required')} approved "
                     f"(level {approvals.get('level')}); missing: {missing}"
                 )
+        _echo_market_doctor(market_report)
+        installed = installer.installed_harnesses()
+        total = len(
+            [
+                name
+                for name in ("claude_code", "codex", "deepseek", "antigravity", "zcode")
+                if name in config.harnesses
+            ]
+        )
+        typer.echo(f"{len(installed)} of {total} harnesses installed")
     if any(result.status == "failed" for result in results):
         raise typer.Exit(code=1)
 
@@ -269,6 +409,7 @@ def status(
     """Show harness availability, authorised models and quota state."""
 
     runtime = _runtime(ctx)
+    _ensure_market(runtime)
     try:
         statuses = asyncio.run(runtime.router.list_harnesses(refresh_models=refresh))
     finally:
@@ -278,11 +419,24 @@ def status(
         typer.echo(_json(payload))
         return
     for item in statuses:
+        if not item.installed:
+            typer.echo(
+                f"{item.harness:14} not installed  {item.version_or_detail or 'binary not found'}"
+            )
+            continue
         state = "available" if item.available else "missing"
         models = ", ".join(item.authorized_models) or "(none discovered)"
         typer.echo(f"{item.harness:14} {state:10} quota={item.quota_state:9} mode={item.mode}")
         typer.echo(f"  binary: {item.binary_path or '-'}  {item.version_or_detail}")
         typer.echo(f"  models: {models}")
+        for detail in item.model_details:
+            tiers = ",".join(detail.get("assigned_tiers") or []) or "-"
+            price = detail.get("blended_price")
+            typer.echo(
+                f"    {detail['model_id']}  intel={detail.get('intelligence')} "
+                f"intel_source={detail.get('intelligence_source')} "
+                f"blended={_price(price)} tiers={tiers}"
+            )
         if item.tier_models:
             typer.echo("  tiers : " + ", ".join(f"{tier}={model}" for tier, model in item.tier_models.items()))
 
@@ -297,6 +451,7 @@ def models(
     """Discover current authorised models and difficulty-tier bindings."""
 
     runtime = _runtime(ctx)
+    _ensure_market(runtime)
     try:
         payload = asyncio.run(
             runtime.router.discover_harness_models(harness=harness, force_refresh=refresh)
@@ -311,6 +466,10 @@ def models(
     else:
         entries = payload
     for name, item in entries.items():
+        if item.get("installed") is False:
+            reason = item.get("reason") or item.get("error") or "binary not found"
+            typer.echo(f"[{name}] not installed ({reason})")
+            continue
         typer.echo(f"[{name}]")
         if item.get("error"):
             typer.echo(f"  error: {item['error']}")
@@ -319,6 +478,9 @@ def models(
             authorized = "yes" if model.get("authorized") else "no"
             typer.echo(
                 f"  {model.get('model_id')}  score={model.get('capability_score')} "
+                f"intel={model.get('intelligence')} "
+                f"intel_source={model.get('intelligence_source')} "
+                f"blended={_price(model.get('blended_price'))} "
                 f"source={model.get('source')} authorized={authorized} tiers={tiers}"
             )
         tiers = item.get("tier_models") or {}
@@ -392,6 +554,12 @@ def dispatch(
     objective: str = typer.Option(..., "--objective", "-o", help="Task objective."),
     harness: str = typer.Option("auto", "--harness", "-H", help="Target harness or 'auto'."),
     difficulty: str = typer.Option("auto", "--difficulty", "-d", help="auto|low|medium|high|critical."),
+    kind: str = typer.Option("auto", "--kind", "-k", help="auto|plan|audit|review|implement|refactor|debug|test|docs."),
+    routing_mode: Optional[str] = typer.Option(
+        None,
+        "--routing-mode",
+        help="auto|manual|off. Omit to use routing.mode or HARNESS_MESH_ROUTING.",
+    ),
     model: Optional[str] = typer.Option(None, "--model", "-m"),
     policy: str = typer.Option("failover", "--policy", help="failover|wait_and_resume|fail."),
     fallback: Optional[list[str]] = typer.Option(None, "--fallback", help="Preferred failover harness (repeatable)."),
@@ -417,6 +585,10 @@ def dispatch(
     # resolves lineage from the same ledger as the MCP server instead of
     # trusting --call-depth or the (host-controlled) environment alone.
     runtime = _runtime(ctx)
+    _ensure_market(runtime)
+    if runtime.router.market is not None:
+        # The one-shot refresh above already spent the dispatch budget.
+        runtime.router.market.skip_next_dispatch_wait = True
     try:
         lineage = _resolved_lineage(runtime.router)
         inherited_depth = lineage.call_depth if lineage is not None else 0
@@ -425,6 +597,7 @@ def dispatch(
             target_harness=harness,
             objective=objective,
             difficulty=TaskDifficulty(difficulty),
+            task_kind=_task_kind_value(kind),
             model=model,
             on_quota_exhausted=QuotaExhaustedPolicy(policy),
             fallback_harnesses=list(fallback or []),
@@ -437,6 +610,8 @@ def dispatch(
             trace_chain=_merge_trace_chain(_trace_chain_option(trace_chain), inherited_trace),
             parent_task_id=os.environ.get("HARNESS_MESH_TASK_ID"),
         )
+        if routing_mode is not None:
+            request.routing_mode = _routing_mode_value(routing_mode)
         result = asyncio.run(runtime.router.dispatch(request))
     finally:
         runtime.storage.close()
@@ -615,6 +790,221 @@ def context_set(
         typer.echo(_json(payload))
         return
     typer.echo(f"saved [{payload.get('category')}] {payload.get('key')}")
+
+
+def _price(value: float | None) -> str:
+    return "-" if value is None else f"{value:g}"
+
+
+@market_app.command("refresh")
+def market_refresh(
+    ctx: typer.Context,
+    source: Optional[list[str]] = typer.Option(
+        None, "--source", "-s", help="Refresh only this source (repeatable)."
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Fetch the configured market sources and update the local snapshot cache."""
+
+    runtime = _runtime(ctx)
+    try:
+        result = asyncio.run(
+            runtime.router.market.refresh(force=True, sources=source)
+        )
+    finally:
+        runtime.storage.close()
+    if json_output:
+        typer.echo(_json(result))
+        return
+    for status in result.statuses:
+        detail = f" error={status.error}" if status.error else ""
+        typer.echo(
+            f"{status.source:20} {status.status:12} models={status.models}{detail}"
+        )
+    catalog = result.catalog
+    typer.echo(
+        f"catalog: {len(catalog.models)} models from "
+        f"{', '.join(catalog.sources) or '-'} stale={catalog.stale}"
+    )
+    for warning in catalog.warnings:
+        typer.echo(f"warning: {warning}")
+
+
+@market_app.command("show")
+def market_show(
+    ctx: typer.Context,
+    model: Optional[str] = typer.Option(
+        None, "--model", "-m", help="Filter by a model glob (matched against key and name)."
+    ),
+    axis: Optional[str] = typer.Option(
+        None, "--axis", help="reasoning|coding: show that axis and sort by it."
+    ),
+    unmatched: bool = typer.Option(
+        False, "--unmatched", help="List harness models that have no market match."
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Show the cached market catalogue and optional unmatched harness models."""
+
+    axis_name = (axis or "").strip().lower() or None
+    if axis_name is not None and axis_name not in {"reasoning", "coding"}:
+        raise typer.BadParameter(
+            "expected one of: reasoning, coding", param_hint="--axis"
+        )
+    runtime = _runtime(ctx)
+    _ensure_market(runtime)
+    ledger_hint: str | None = None
+    catalog_empty = True
+    try:
+        catalog = runtime.router.market.catalog()
+        catalog_empty = not catalog.models
+        rows = filter_market_models(catalog.models, model)
+        if axis_name is not None:
+            field = f"intelligence_{axis_name}"
+            rows = sorted(
+                rows,
+                key=lambda item: (
+                    getattr(item, field) is None,
+                    -(getattr(item, field) or 0.0),
+                    item.key,
+                ),
+            )
+        payload: dict[str, Any] = {
+            "models": [item.model_dump(mode="json") for item in rows],
+            "matched": len(rows),
+            "axis": axis_name,
+            "sources": list(catalog.sources),
+            "fetched_at": catalog.fetched_at,
+            "stale": catalog.stale,
+            "expired": catalog.expired,
+            "warnings": list(catalog.warnings),
+            "attribution": EPOCH_ATTRIBUTION,
+        }
+        if unmatched:
+            ledger = runtime.storage.list_discovered_models()
+            if not ledger:
+                payload["unmatched"] = []
+                ledger_hint = (
+                    "No harness models are in the discovery ledger yet; "
+                    "run `hmesh models --refresh` first."
+                )
+            else:
+                inventory: dict[str, list[str]] = {}
+                for found in ledger:
+                    inventory.setdefault(found.harness, []).append(found.model_id)
+                payload["unmatched"] = list_unmatched(
+                    inventory,
+                    catalog.models,
+                    aliases=runtime.config.market.aliases,
+                )
+    finally:
+        runtime.storage.close()
+
+    if json_output:
+        typer.echo(_json(payload))
+        return
+    # ``--unmatched`` alone is a report about harness models, not a dump of the
+    # whole catalogue.  A model filter still shows both by request.
+    if not unmatched or model:
+        if catalog_empty:
+            typer.echo("No market data is cached. Run `hmesh market refresh`.")
+        elif model and not rows:
+            typer.echo(f"no model matches {model}")
+        for item in rows:
+            axis_column = ""
+            if axis_name is not None:
+                value = getattr(item, f"intelligence_{axis_name}")
+                axis_column = f" {axis_name}={value if value is not None else '-':>5}"
+            typer.echo(
+                f"{item.key:48} in={_price(item.input_per_mtok):>8} "
+                f"out={_price(item.output_per_mtok):>8} "
+                f"intel={item.intelligence if item.intelligence is not None else '-':>5} "
+                f"source={item.intelligence_source or '-'} "
+                f"bench={len(item.benchmarks_used)} "
+                f"data={item.benchmark_data_date or '-'} "
+                f"ctx={item.context_window or '-'}{axis_column}"
+            )
+        if payload["stale"]:
+            typer.echo("cache is stale; refresh it when the network is available")
+    if unmatched:
+        entries = payload["unmatched"]
+        if ledger_hint:
+            typer.echo(ledger_hint)
+        elif not entries:
+            typer.echo("No unmatched harness models.")
+        for entry in entries:
+            effort = f" effort={entry['effort_variant']}" if entry["effort_variant"] else ""
+            typer.echo(
+                f"unmatched {entry['harness']:14} {entry['model_id']}{effort} "
+                f"confidence={entry.get('confidence', 'none')} -> add market.aliases"
+            )
+    # The attribution is always the final line of the text output.
+    typer.echo(EPOCH_ATTRIBUTION)
+
+
+@app.command()
+def route(
+    ctx: typer.Context,
+    objective: str = typer.Option(..., "--objective", "-o", help="Task objective to preview."),
+    kind: str = typer.Option("auto", "--kind", "-k", help="auto|plan|audit|review|implement|refactor|debug|test|docs."),
+    difficulty: str = typer.Option("auto", "--difficulty", "-d", help="auto|low|medium|high|critical."),
+    harness: str = typer.Option("auto", "--harness", "-H", help="Target harness or 'auto'."),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Preview the model routing decision without dispatching a ticket."""
+
+    task_kind = _task_kind_value(kind)
+    try:
+        level = TaskDifficulty(str(difficulty).lower())
+    except ValueError as exc:
+        raise typer.BadParameter(
+            "expected one of: " + ", ".join(item.value for item in TaskDifficulty),
+            param_hint="--difficulty",
+        ) from exc
+    runtime = _runtime(ctx)
+    _ensure_market(runtime)
+    try:
+        payload = asyncio.run(
+            runtime.router.preview_routing(
+                objective,
+                task_kind=task_kind.value,
+                difficulty=level.value,
+                target_harness=harness,
+            )
+        )
+    finally:
+        runtime.storage.close()
+
+    if json_output:
+        typer.echo(_json(payload))
+        return
+    if payload.get("error"):
+        typer.echo(f"error: {payload['error']}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(
+        f"task_kind={payload['task_kind']} tier={payload['tier']} "
+        f"candidates={payload['candidate_count']} market_models={payload['market_models']}"
+    )
+    routing = payload.get("routing") or {}
+    chosen = routing.get("chosen")
+    if chosen:
+        typer.echo(
+            f"route: {chosen['harness']}/{chosen['model']} "
+            f"effort={chosen.get('effort') or 'default'} "
+            f"intelligence={chosen.get('intelligence')} "
+            f"source={chosen.get('intelligence_source')} "
+            f"blended_price={chosen.get('blended_price')}"
+        )
+    else:
+        typer.echo("no routed choice; dispatch would use the existing difficulty tier")
+    for alternative in routing.get("alternatives") or []:
+        typer.echo(
+            f"  alternative {alternative['harness']}/{alternative['model']} "
+            f"score={alternative['score']} intelligence={alternative['intelligence']}"
+        )
+    for reason in routing.get("reasons") or []:
+        typer.echo(f"  - {reason}")
+    typer.echo(routing.get("attribution") or EPOCH_ATTRIBUTION)
 
 
 @app.command()
