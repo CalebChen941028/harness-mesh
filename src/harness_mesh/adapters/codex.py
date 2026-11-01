@@ -36,7 +36,7 @@ class CodexAdapter(BaseHarnessAdapter):
             if "--sandbox" not in args:
                 exec_flags.extend(["--sandbox", "read-only"])
         elif (
-            self.harness_config.auto_approve
+            self._auto_approval_allowed(call)
             and "--full-auto" not in args
             and "--sandbox" not in args
             and "--ask-for-approval" not in args

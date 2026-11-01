@@ -185,6 +185,7 @@ class MeshConfig(BaseModel):
     model_cache_ttl_seconds: int = 300
     allowed_workspace_roots: list[str] = Field(default_factory=list)
     auto_init_repo: bool = False
+    auto_approve_shared_write: bool = False
     suspend_when_no_candidate: bool = True
     failover_on_error: bool = True
     failover_priority: list[str] = Field(

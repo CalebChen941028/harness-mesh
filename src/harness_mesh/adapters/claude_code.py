@@ -16,7 +16,7 @@ class ClaudeCodeAdapter(BaseHarnessAdapter):
             if "--permission-mode" not in args:
                 extra.extend(["--permission-mode", "plan"])
         elif (
-            self.harness_config.auto_approve
+            self._auto_approval_allowed(call)
             and "--dangerously-skip-permissions" not in args
             and "--permission-mode" not in args
         ):

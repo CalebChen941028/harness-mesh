@@ -466,6 +466,7 @@ class MeshRouter:
                 trace_chain=[*trace_chain, current_harness],
                 call_depth=request.call_depth + 1,
                 read_only=(mode == WorkspaceMode.READ_ONLY),
+                shared_write=(mode == WorkspaceMode.SHARED_WRITE),
                 session_id=request.session_id,
                 skills=[skill.name for skill in skills_selected],
                 task=request,

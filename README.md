@@ -234,6 +234,9 @@ Key settings:
 | Setting | Default | Meaning |
 | :--- | :--- | :--- |
 | `state_dir` | `.harness-mesh` | Ledger, worktrees, generated MCP configs |
+| `allowed_workspace_roots` | service workspace | Optional allowlist for request-level `workspace_root`; symlinks are resolved before containment checks |
+| `auto_init_repo` | `false` | Refuse a non-Git workspace unless it is explicitly enabled |
+| `auto_approve_shared_write` | `false` | Injection of approval-bypass flags when `workspace_mode=shared_write` |
 | `summary_max_chars` | `1500` | Summary returned to the controller |
 | `diff_preview_max_chars` | `4000` | Diff preview returned to the controller |
 | `max_call_depth` | `3` | Nested dispatch depth limit |
@@ -254,7 +257,8 @@ The fast suite uses mocked adapters and temporary Git repositories. `tests/test_
 ## Operational notes
 
 - The mesh state directory may contain source excerpts and prompts. Keep it out of commits and shared archives.
-- Approval-bypass flags make a disposable worktree convenient, not safe. Use isolated worktrees, review diffs, and respect provider terms.
+- Approval-bypass flags make a disposable worktree convenient, not safe. Built-in harnesses default to `auto_approve: true` for isolated worktrees; `shared_write` suppresses bypass unless `auto_approve_shared_write: true`. Use isolated worktrees, review diffs, and respect provider terms.
+- The DeepSeek built-in runtime strips credential-shaped environment variables from its shell tool. That reduces accidental key exposure but does not create a sandbox.
 - A one-shot `hmesh dispatch --policy wait_and_resume` exits after scheduling the suspension; the long-lived MCP server runs the background monitor and effects consumer. Use `hmesh quota --probe` or the MCP tool to resume manually.
 - Antigravity SDK timeouts cancel waiting but cannot kill a third-party worker thread.
 - Codex CLI versions differ in accepted approval flags. The built-in default injects `--full-auto`; the example YAML overrides it with `--dangerously-bypass-approvals-and-sandbox` for codex-cli 0.166. Adjust `execute_template` or `extra.auto_approve_args` for your version.

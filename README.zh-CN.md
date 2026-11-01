@@ -221,7 +221,8 @@ hmesh init-mcp [--print] [--target PATH]
 ## 运维与边界
 
 - `.harness-mesh/` 可能包含源码片段和提示词，不要提交或随意共享。
-- 审批放行参数只服务于一次性 Worktree，不等同于安全沙箱；请使用隔离模式、审查 Diff，并遵守厂商条款。
+- 审批放行参数只服务于一次性 Worktree，不等同于安全沙箱。五个内置 Harness 默认 `auto_approve: true`；`shared_write` 模式默认不注入放行参数，只有 `auto_approve_shared_write: true` 才注入。请审查 Diff，并遵守厂商条款。
+- DeepSeek 内置运行时会从 shell 工具环境中剔除凭据形态的变量，降低误暴露风险；这不构成文件系统或网络沙箱。
 - 一次性 `hmesh dispatch --policy wait_and_resume` 只负责挂起；后台探活和 effects 消费运行在常驻的 `hmesh-mcp` 中，也可手动 `hmesh quota --probe`。
 - Antigravity SDK 超时只能取消等待，无法强杀第三方线程。
 - Codex 各版本接受的审批参数不同。代码内默认注入 `--full-auto`；示例 YAML 针对 codex-cli 0.166 改用 `--dangerously-bypass-approvals-and-sandbox`。可按需调整 `execute_template` 或 `extra.auto_approve_args`。

@@ -94,6 +94,21 @@ def ensure_service_workspace(root: str | Path) -> Path:
     return target
 
 
+_SENSITIVE_ENV_MARKERS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD")
+
+
+def scrub_subprocess_env(env: dict[str, str]) -> dict[str, str]:
+    """Drop credential-shaped variables while keeping ordinary process state."""
+
+    cleaned: dict[str, str] = {}
+    for key, value in env.items():
+        upper = key.upper()
+        if any(marker in upper for marker in _SENSITIVE_ENV_MARKERS):
+            continue
+        cleaned[str(key)] = str(value)
+    return cleaned
+
+
 __all__ = [
     "SENSITIVE_FILE_PATTERNS",
     "WorkspaceRootError",
@@ -102,4 +117,5 @@ __all__ = [
     "is_sensitive_name",
     "is_sensitive_path",
     "resolve_allowed_root",
+    "scrub_subprocess_env",
 ]

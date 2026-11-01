@@ -31,7 +31,7 @@ class AntigravityAdapter(BaseHarnessAdapter):
         if "--mode" not in args:
             if call.read_only:
                 extra.extend(["--mode", "plan"])
-            elif self.harness_config.auto_approve:
+            elif self._auto_approval_allowed(call):
                 extra.extend(self._auto_approve_args(["--dangerously-skip-permissions"]))
         if call.session_id and "--conversation" not in args:
             extra.extend(["--conversation", call.session_id])
