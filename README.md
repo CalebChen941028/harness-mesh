@@ -37,7 +37,7 @@ It is not a replacement for a harness's permission model, sandbox, or vendor ter
 ## Requirements
 
 - Python 3.11+.
-- One or more supported harness CLIs installed and logged in.
+- One or more supported harness CLIs installed and logged in. A harness that Harness-Mesh runs as a worker needs its own command-line login; see [Logins: controller versus worker](#logins-controller-versus-worker).
 - Git available on `PATH` for isolated worktrees.
 - macOS is the primary target for the shipped App Bundle paths. Linux/WSL works with binaries on `PATH`; real-machine tests skip when the macOS bundles are absent.
 
@@ -134,6 +134,28 @@ Claude Code and Codex are often installed first; ZCode or another supported harn
 `plan_integration` returns a `plan_id`: the first 16 hex characters of a SHA-256 over the normalised plan and the current content of the target files. `install_integration` recomputes the plan and refuses any id that no longer matches, so editing a config file between review and install forces a new review. It is a `write` tool; the default `dispatch` level leaves it for manual approval. Workers are refused through the same lineage resolution as nested dispatch, `HARNESS_MESH_READ_ONLY=1` blocks it, and the target harness must restart before its tool list appears.
 
 `hmesh integrations ignore zcode` stops the reminder and `unignore` restores it. The command writes only `integration.ignore` in the Mesh config; it never edits another application's configuration.
+
+### Logins: controller versus worker
+
+A harness can play two roles, and each role uses a different login.
+
+| Role | Who calls the model | Login it needs |
+|---|---|---|
+| Controller | You, inside the harness, for example the Claude Code desktop app calling the harness-mesh tools | The login the harness application already has |
+| Worker | Harness-Mesh starts the harness command-line tool as a subprocess to run a ticket | The command-line tool's own credentials |
+
+The two logins can differ. Measured on macOS with the Claude Code desktop app (2026-11-01): the app was logged in and called every harness-mesh tool as a controller, while the bundled `claude` command reported `loggedIn: false` and `Not logged in · Please run /login`. The desktop app hands credentials to the sessions it hosts through its own channel; no keychain item, credentials file or API key existed for a separately started `claude` to read. A command-line Claude Code used as a controller is itself the command line, so it needs the command-line login too.
+
+When a worker is not logged in, Harness-Mesh does not fail the ticket. The first attempt returns `not_logged_in`, the harness circuit opens (`hmesh quota` shows `claude_code/*: state=open reason=not_logged_in`), routing skips that harness and the ticket moves to another one, for example Claude models served through Antigravity. Probes run automatically and the circuit closes once the login works.
+
+To use the Claude Code command line as a worker, log in once in a terminal and confirm it:
+
+```bash
+claude auth login        # or set ANTHROPIC_API_KEY
+claude auth status       # loggedIn must be true
+```
+
+The same rule applies to every harness: a worker uses that tool's own login. `hmesh status` and `hmesh quota` show which harnesses are usable. Not verified: whether a worker started by a Harness-Mesh server hosted inside the desktop app can inherit the desktop login; on the test machine it could not.
 
 ## Quick start
 

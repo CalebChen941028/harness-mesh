@@ -37,7 +37,7 @@ Harness-Mesh 是本地编排层，交付形态有四个：
 ## 环境要求
 
 - Python 3.11 及以上；
-- 一个或多个已安装并登录的受支持 Harness CLI；
+- 一个或多个已安装并登录的受支持 Harness CLI；被 Harness-Mesh 当作 Worker 运行的 Harness 需要命令行自己的登录，见[登录：控制端与 Worker](#登录控制端与-worker)；
 - Git 在 `PATH` 中，用于隔离 Worktree；
 - 默认二进制路径针对 macOS 桌面应用；Linux/WSL 可通过配置使用 `PATH` 中的命令行。非 macOS 环境会自动跳过真机测试。
 
@@ -129,6 +129,28 @@ Claude Code 与 Codex 常先装好，ZCode 或其他受支持 Harness 可能后�
 `plan_integration` 返回 `plan_id`：把规范化计划与目标文件当前内容做 SHA-256，取前 16 位十六进制字符。`install_integration` 会重新计算计划，id 不一致就拒绝；审阅之后有人改了配置文件，必须重新审阅。它属于 `write` 类，默认级别 `dispatch` 下留给人工批准。Worker 会被与嵌套派发相同的谱系解析拒绝，`HARNESS_MESH_READ_ONLY=1` 也会阻止安装；目标 Harness 需要重启才会出现新工具。
 
 `hmesh integrations ignore zcode` 停止提示，`unignore` 恢复。命令只写 Mesh 配置里的 `integration.ignore`，不会改动其他应用的配置。
+
+### 登录：控制端与 Worker
+
+同一个 Harness 可以扮演两种角色，两种角色用的是两套登录。
+
+| 角色 | 谁调用模型 | 需要的登录 |
+|---|---|---|
+| 控制端 | 你在 Harness 里使用它，例如在 Claude Code 桌面应用里调用 harness-mesh 的工具 | 该 Harness 应用已有的登录 |
+| Worker | Harness-Mesh 以子进程方式启动该 Harness 的命令行去执行任务单 | 命令行自己的凭据 |
+
+这两种登录可以不一样。在 macOS 上用 Claude Code 桌面应用的实测结果（2026-11-01）：桌面应用已登录，作为控制端能调用全部 harness-mesh 工具；但它自带的 `claude` 命令报告 `loggedIn: false`，调用模型时返回 `Not logged in · Please run /login`。桌面应用通过自己的内部通道把凭据交给它托管的会话，没有钥匙串条目、凭据文件或 API 密钥可供单独启动的 `claude` 读取。在终端里使用的命令行版 Claude Code 本身就是命令行，当控制端同样需要命令行登录。
+
+Worker 未登录时，Harness-Mesh 不会让任务单失败：第一次尝试返回 `not_logged_in`，该 Harness 的熔断器打开（`hmesh quota` 显示 `claude_code/*: state=open reason=not_logged_in`），路由跳过它，任务单换到别的 Harness，例如通过 Antigravity 提供的 Claude 模型。系统会自动探测，登录生效后熔断器自动关闭。
+
+要把 Claude Code 命令行当 Worker 使用，在终端登录一次并确认：
+
+```bash
+claude auth login        # 或设置 ANTHROPIC_API_KEY
+claude auth status       # loggedIn 必须为 true
+```
+
+规则对所有 Harness 一致：Worker 使用该工具自己的登录。`hmesh status` 与 `hmesh quota` 会显示哪些 Harness 当前可用。未验证的一点：桌面应用内托管的 Harness-Mesh 服务所启动的 Worker 能否继承桌面端的登录，测试机上观察到不能。
 
 ## 快速开始
 

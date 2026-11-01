@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Documentation
+
+- Both READMEs explain that a harness's controller login and worker login differ. Measured with the Claude Code desktop app: it works as a controller while the bundled `claude` command stays logged out, so a worker needs `claude auth login` or `ANTHROPIC_API_KEY`; without it the circuit opens with `not_logged_in` and tickets move to another harness.
+
 ## 0.4.0 — 2026-11-01
 
 ### Added
