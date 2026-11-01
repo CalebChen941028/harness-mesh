@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import re
 import subprocess
 from pathlib import Path
 from typing import Iterable
@@ -137,7 +138,24 @@ def ensure_service_workspace(root: str | Path) -> Path:
     return target
 
 
-_SENSITIVE_ENV_MARKERS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD")
+_SENSITIVE_ENV_MARKERS = (
+    "API_KEY",
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "CREDENTIAL",
+    "PRIVATE_KEY",
+    "_AUTH",
+    "_PAT",
+)
+_SENSITIVE_ENV_EXACT = {
+    "AWS_ACCESS_KEY_ID",
+    "SSH_AUTH_SOCK",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "DATABASE_URL",
+}
+_URL_WITH_PASSWORD = re.compile(r"://[^/@\s:]+:[^/@\s]+@")
 
 
 def scrub_subprocess_env(env: dict[str, str]) -> dict[str, str]:
@@ -145,10 +163,18 @@ def scrub_subprocess_env(env: dict[str, str]) -> dict[str, str]:
 
     cleaned: dict[str, str] = {}
     for key, value in env.items():
-        upper = key.upper()
+        name = str(key)
+        if name.startswith("HARNESS_MESH_"):
+            cleaned[name] = str(value)
+            continue
+        upper = name.upper()
+        if upper in _SENSITIVE_ENV_EXACT:
+            continue
         if any(marker in upper for marker in _SENSITIVE_ENV_MARKERS):
             continue
-        cleaned[str(key)] = str(value)
+        if _URL_WITH_PASSWORD.search(str(value)):
+            continue
+        cleaned[name] = str(value)
     return cleaned
 
 
