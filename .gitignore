@@ -13,5 +13,3 @@ build/
 .env
 .env.*
 *.log
-PROMPT_DEEPSEEK.md
-SPEC.md
