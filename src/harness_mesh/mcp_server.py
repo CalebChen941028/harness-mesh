@@ -1,10 +1,9 @@
-"""FastMCP server exposing the eleven cross-harness orchestration tools."""
+"""FastMCP server exposing the thirteen cross-harness orchestration tools."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import os
 from typing import Any
 
@@ -14,6 +13,13 @@ except ImportError:  # pragma: no cover - MCP v2 renamed FastMCP to MCPServer
     from mcp.server.mcpserver import MCPServer as FastMCP  # type: ignore
 
 from .config import load_config
+from .lineage import (
+    _effective_call_depth,
+    _inherited_lineage,
+    _merge_trace_chain,
+    _task_id_from_cwd,
+    _workspace_from_cwd,
+)
 from .models import (
     ContinuationCheckpoint,
     QuotaExhaustedPolicy,
@@ -23,6 +29,7 @@ from .models import (
 )
 from .router import MeshRouter, MeshRuntime, create_mesh_runtime
 from .storage import ResourceNotFoundError, TaskNotFoundError
+from .workspace import WorkspaceError
 
 TOOL_NAMES = [
     "list_harnesses",
@@ -43,33 +50,10 @@ TOOL_NAMES = [
 _runtime: MeshRuntime | None = None
 
 
-def _env_int(name: str) -> int | None:
-    value = os.environ.get(name)
-    if not value:
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        return None
-
-
-def _env_trace_chain(name: str = "HARNESS_MESH_TRACE_CHAIN") -> list[str] | None:
-    value = os.environ.get(name)
-    if not value:
-        return None
-    try:
-        payload = json.loads(value)
-    except json.JSONDecodeError:
-        return None
-    if isinstance(payload, list):
-        return [str(item) for item in payload]
-    return None
-
-
 def get_runtime() -> MeshRuntime:
     global _runtime
     if _runtime is None:
-        workspace = os.environ.get("HARNESS_MESH_WORKSPACE") or os.getcwd()
+        workspace = os.environ.get("HARNESS_MESH_WORKSPACE") or _workspace_from_cwd()
         _runtime = create_mesh_runtime(
             config_path=os.environ.get("HARNESS_MESH_CONFIG"),
             workspace_root=workspace,
@@ -150,6 +134,7 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
         in the same worktree.
         """
 
+        inherited_depth, inherited_trace = _inherited_lineage(router)
         request_kwargs: dict[str, Any] = {
             "target_harness": target_harness,
             "objective": objective,
@@ -171,12 +156,8 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
             "workspace_root": workspace_root or str(router.workspace_root),
             "timeout_seconds": timeout_seconds,
             "session_id": session_id,
-            "call_depth": call_depth if call_depth is not None else (_env_int("HARNESS_MESH_CALL_DEPTH") or 0),
-            "trace_chain": (
-                list(trace_chain)
-                if trace_chain is not None
-                else (_env_trace_chain() or [])
-            ),
+            "call_depth": _effective_call_depth(call_depth, inherited_depth),
+            "trace_chain": _merge_trace_chain(trace_chain, inherited_trace),
             "checkpoint": ContinuationCheckpoint.model_validate(checkpoint) if checkpoint else None,
         }
         if max_failover_attempts is not None:
@@ -196,16 +177,14 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
     ) -> dict[str, Any]:
         """Dispatch multiple tickets concurrently across different harnesses."""
 
-        inherited_depth = _env_int("HARNESS_MESH_CALL_DEPTH")
-        inherited_trace = _env_trace_chain()
         parent_task_id = os.environ.get("HARNESS_MESH_TASK_ID")
+        inherited_depth, inherited_trace = _inherited_lineage(router)
         normalized: list[dict[str, Any]] = []
         for task in tasks:
             item = dict(task)
-            if "call_depth" not in item and inherited_depth is not None:
-                item["call_depth"] = inherited_depth
-            if "trace_chain" not in item and inherited_trace is not None:
-                item["trace_chain"] = inherited_trace
+            item.setdefault("workspace_root", str(router.workspace_root))
+            item["call_depth"] = _effective_call_depth(item.get("call_depth"), inherited_depth)
+            item["trace_chain"] = _merge_trace_chain(item.get("trace_chain"), inherited_trace)
             if "parent_task_id" not in item and parent_task_id:
                 item["parent_task_id"] = parent_task_id
             normalized.append(item)
@@ -263,11 +242,21 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
 
     @server.tool()
     def apply_task_patch(task_id: str, strategy: str = "patch") -> dict[str, Any]:
-        """Apply the isolated worktree changes back into the primary workspace."""
+        """Apply the isolated worktree changes back into the primary workspace.
 
+        Only ``patch`` and ``merge`` are exposed over MCP. The ``copy``
+        strategy is destructive and remains a CLI-only operation.
+        """
+
+        if strategy not in {"patch", "merge"}:
+            return {
+                "error": "MCP apply_task_patch supports only 'patch' or 'merge'; "
+                "use the CLI `hmesh apply --strategy copy --force-copy`",
+                "task_id": task_id,
+            }
         try:
             return router.apply_task_patch(task_id, strategy=strategy)
-        except (TaskNotFoundError, Exception) as exc:  # noqa: B014 - keep MCP responses structured
+        except (TaskNotFoundError, WorkspaceError, ValueError) as exc:
             return {"error": _error_detail(exc), "task_id": task_id}
 
     @server.tool()
@@ -300,12 +289,14 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
         """Write or update one shared project fact or interface contract."""
 
         try:
+            source = "worker" if _task_id_from_cwd(router) or os.environ.get("HARNESS_MESH_TASK_ID") else "controller"
             return router.update_project_context(
                 key,
                 content,
                 category=category,
                 author_harness=author_harness,
                 task_id=task_id,
+                source=source,
             )
         except Exception as exc:
             return {"error": _error_detail(exc), "key": key}
@@ -340,7 +331,13 @@ async def _serve(args: argparse.Namespace) -> None:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="hmesh-mcp", description="Harness-Mesh MCP server")
     parser.add_argument("--config", default=os.environ.get("HARNESS_MESH_CONFIG"))
-    parser.add_argument("--workspace", default=os.environ.get("HARNESS_MESH_WORKSPACE") or os.getcwd())
+    # When the host launches the MCP server from inside a worktree (Codex
+    # forwards cwd but not the mesh environment), the project workspace is the
+    # parent of .harness-mesh, not the worktree directory itself.
+    parser.add_argument(
+        "--workspace",
+        default=os.environ.get("HARNESS_MESH_WORKSPACE") or _workspace_from_cwd(),
+    )
     parser.add_argument(
         "--no-monitor",
         action="store_true",

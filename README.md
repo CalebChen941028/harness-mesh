@@ -82,10 +82,15 @@ Useful options:
 
 ```bash
 hmesh install --dry-run                 # print planned commands/files, change nothing
+hmesh install --yes                     # non-interactive install
 hmesh install --harness zcode           # one harness only (repeatable)
 hmesh install --workspace /path/project # pin the MCP workspace explicitly
 hmesh install --uninstall               # remove integrations
 ```
+
+Without `--dry-run`, `hmesh install` prints the planned files and commands and asks for confirmation. A non-interactive shell must pass `--yes`.
+
+ZCode's `--scope project` still records the marketplace and plugin in the global state files `~/.zcode/cli/plugins/known_marketplaces.json` and `installed_plugins.json`, even though the plugin and its cache are project-scoped. `hmesh install --uninstall` removes both entries; the matching `zcode plugins uninstall` and `zcode plugins marketplace remove` commands do the same by hand.
 
 Restart the desktop application after installation and start a new chat/task. Existing chats may keep a cached tool list. The installer is idempotent; editing an existing DSH entry or re-adding an MCP server replaces the previous registration rather than duplicating it.
 
@@ -119,6 +124,8 @@ hmesh dispatch --harness deepseek \
 hmesh tasks
 hmesh read <task_id> diff --limit 4000
 hmesh apply <task_id> --strategy patch
+hmesh apply <task_id> --strategy copy --force-copy
+hmesh doctor
 ```
 
 Start the MCP server with background recovery and effects consumption (the default):
@@ -201,7 +208,7 @@ These blocks are project data, not instructions that override the ticket objecti
 | `read_task_resource` | Page through `diff`, `transcript` or `assignments` |
 | `get_quota_status` | Circuits, waiting queue; `probe_now` probes and resumes |
 | `report_quota_status` | Manual `reset`, `open` or `half_open` |
-| `apply_task_patch` | Apply isolated worktree changes to the primary workspace |
+| `apply_task_patch` | Apply a completed isolated worktree to the primary workspace with `patch` or `merge` (copy stays CLI-only) |
 | `cancel_task` | Cancel a running or waiting ticket; child processes are killed |
 | `get_project_context` | Read shared memory entries and scanned instruction files |
 | `update_project_context` | Write or update one shared project fact/contract |
@@ -209,7 +216,8 @@ These blocks are project data, not instructions that override the ticket objecti
 ## CLI
 
 ```text
-hmesh install [--dry-run] [--harness H]... [--uninstall]
+hmesh install [--dry-run] [--yes] [--harness H]... [--uninstall]
+hmesh doctor [--harness H] [--json]
 hmesh status [--refresh] [--json]
 hmesh models [--refresh] [--harness H]
 hmesh quota [--probe]
@@ -217,7 +225,7 @@ hmesh skills [--query Q]
 hmesh dispatch --harness H --objective O [--difficulty D] [--fallback H]...
 hmesh tasks [--status S]
 hmesh read <task_id> [diff|transcript|assignments] [--offset N] [--limit N]
-hmesh apply <task_id> [--strategy patch|merge|copy]
+hmesh apply <task_id> [--strategy patch|merge|copy] [--force-copy]
 hmesh context list [--category C] [--json]
 hmesh context set <key> <content> [--category C] [--author A] [--task-id T]
 hmesh init-mcp [--print] [--target PATH]
@@ -234,6 +242,10 @@ Key settings:
 | Setting | Default | Meaning |
 | :--- | :--- | :--- |
 | `state_dir` | `.harness-mesh` | Ledger, worktrees, generated MCP configs |
+| `allowed_workspace_roots` | service workspace | Optional allowlist for request-level `workspace_root`; symlinks are resolved before containment checks |
+| `auto_init_repo` | `false` | Refuse a non-Git workspace unless it is explicitly enabled |
+| `auto_approve_shared_write` | `false` | Injection of approval-bypass flags when `workspace_mode=shared_write` |
+| `max_active_assignments` | `8` | Global cap on simultaneously running assignments |
 | `summary_max_chars` | `1500` | Summary returned to the controller |
 | `diff_preview_max_chars` | `4000` | Diff preview returned to the controller |
 | `max_call_depth` | `3` | Nested dispatch depth limit |
@@ -254,10 +266,22 @@ The fast suite uses mocked adapters and temporary Git repositories. `tests/test_
 ## Operational notes
 
 - The mesh state directory may contain source excerpts and prompts. Keep it out of commits and shared archives.
-- Approval-bypass flags make a disposable worktree convenient, not safe. Use isolated worktrees, review diffs, and respect provider terms.
+- Approval-bypass flags make a disposable worktree convenient, not safe. Built-in harnesses default to `auto_approve: true` for isolated worktrees; `shared_write` suppresses bypass unless `auto_approve_shared_write: true`. Use isolated worktrees, review diffs, and respect provider terms.
+- The DeepSeek built-in runtime strips credential-shaped environment variables from its shell tool. That reduces accidental key exposure but does not create a sandbox.
 - A one-shot `hmesh dispatch --policy wait_and_resume` exits after scheduling the suspension; the long-lived MCP server runs the background monitor and effects consumer. Use `hmesh quota --probe` or the MCP tool to resume manually.
 - Antigravity SDK timeouts cancel waiting but cannot kill a third-party worker thread.
 - Codex CLI versions differ in accepted approval flags. The built-in default injects `--full-auto`; the example YAML overrides it with `--dangerously-bypass-approvals-and-sandbox` for codex-cli 0.166. Adjust `execute_template` or `extra.auto_approve_args` for your version.
+
+## Workspace and context boundaries
+
+- The MCP server and CLI require a Git workspace; startup fails from `$HOME`, `/`, or a directory without Git.
+- Request-level `workspace_root` must resolve (including symlinks) inside `allowed_workspace_roots`, which defaults to the service workspace.
+- Sensitive filtering covers `.env` and real credential/key files, plus `.ssh`, `.aws`, `.gnupg`, and `.git` path segments. `.env.example`, `.env.sample`, `.env.template`, `.env.dist`, ordinary `credentials_service.py`-style source, and public `*.pub` keys stay visible. Every skipped path is reported in `skipped_sensitive` and warnings; Mesh no longer edits the user's `.git/info/exclude`.
+- Worktree symlinks are rewritten as relative links into the worktree. Escaping or dangling links are reported; apply rejects symlink diffs that leave the target root.
+- Approval bypass flags are suppressed for `shared_write` unless `auto_approve_shared_write: true`; the DeepSeek built-in shell drops credential-shaped environment variables, cloud key names, SSH agent sockets, and URLs containing passwords.
+- Shared memory is capped at 128 characters per key, 4,000 per entry and 6,000 rendered characters. Only `controller` entries render as verified; worker and auto entries render in a separate unverified block. Author validation checks the name only.
+- Mesh Git commands disable hooks, fsmonitor, pager, external diff and protocol.ext, record a per-task metadata guard once, and reject apply or abort the ticket when metadata changes after task start.
+- MCP call depth can be recovered from the worktree cwd or lineage marker when inherited environment variables are unavailable; `max_active_assignments` caps running assignments.
 
 ## Trademarks and independence
 

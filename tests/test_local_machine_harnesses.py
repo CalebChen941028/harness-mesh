@@ -1,14 +1,12 @@
 """Real-machine integration tests for the five locally installed harnesses.
 
-These tests intentionally call the real CLIs and are skipped on machines where
-the expected macOS application bundles are absent.
+These tests call the real CLIs and consume provider quota.  They only run when
+``HARNESS_MESH_REAL_MACHINE=1`` is set on a machine with all five installations;
+``pytest -q`` alone never touches a real harness.
 """
 
 from __future__ import annotations
 
-import glob
-import os
-import sys
 from pathlib import Path
 
 import pytest
@@ -17,36 +15,19 @@ from harness_mesh.config import default_config
 from harness_mesh.models import TaskRequest, TaskStatus
 from harness_mesh.router import create_mesh_runtime
 from tests.helpers import init_git_repo
-
-REAL_PATHS = {
-    "claude_code": "~/Library/Application Support/Claude/claude-code/*/*/claude.app/Contents/MacOS/claude",
-    "codex": "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
-    "deepseek": "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh",
-    "antigravity": "/Applications/Gemini.app/Contents/Helpers/agy",
-    "zcode": "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
-}
-
-
-def _real_machine_available() -> bool:
-    if sys.platform != "darwin":
-        return False
-    for _, pattern in REAL_PATHS.items():
-        expanded = os.path.expanduser(pattern)
-        if glob.glob(expanded) if "*" in expanded else Path(expanded).exists():
-            continue
-        return False
-    return True
-
+from tests.real_machine import real_machine_available, real_machine_enabled, skip_reason
 
 pytestmark = pytest.mark.skipif(
-    not _real_machine_available(),
-    reason="real Claude/Codex/DSH/Antigravity/ZCode installations not found",
+    not real_machine_enabled() or not real_machine_available(),
+    reason=skip_reason(),
 )
 
 
 @pytest.mark.asyncio
 async def test_real_status_and_full_model_inventory(tmp_path):
-    runtime = create_mesh_runtime(config=default_config(), workspace_root=tmp_path / "workspace")
+    workspace = tmp_path / "workspace"
+    init_git_repo(workspace, {"README.md": "real-machine status fixture\n"})
+    runtime = create_mesh_runtime(config=default_config(), workspace_root=workspace)
     try:
         statuses = await runtime.router.list_harnesses(refresh_models=True)
         by_name = {status.harness: status for status in statuses}

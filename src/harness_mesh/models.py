@@ -139,6 +139,14 @@ class AssignmentRecord(_Model):
     duration_ms: int | None = None
     exit_code: int | None = None
     session_id: str | None = None
+    # Exact lineage values handed to the adapter (already depth + 1 with the
+    # running harness appended), so a nested MCP server can recover them even
+    # when the host drops the environment.
+    call_depth: int = 0
+    trace_chain: list[str] = Field(default_factory=list)
+    # pid of the harness process the adapter spawned.  NULL means unknown
+    # (legacy rows); the dispatcher pid is used when no child is started.
+    pid: int | None = None
 
     @field_validator("status")
     @classmethod
@@ -249,6 +257,7 @@ class TaskResult(_Model):
     modified_files: list[str] = Field(default_factory=list)
     git_diff: str = ""
     git_diff_truncated: bool = False
+    warnings: list[str] = Field(default_factory=list)
     read_pointers: dict[str, str] = Field(default_factory=dict)
     worktree_path: str | None = None
     worktree_branch: str | None = None

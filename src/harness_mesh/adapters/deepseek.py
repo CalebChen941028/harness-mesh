@@ -26,6 +26,7 @@ from typing import Any
 import httpx
 import yaml
 
+from ..security import scrub_subprocess_env
 from .base import AdapterCall, AdapterOutcome, BaseHarnessAdapter
 
 
@@ -248,7 +249,12 @@ class DeepSeekAdapter(BaseHarnessAdapter):
 
     def _build_env(self, call: AdapterCall) -> dict[str, str]:
         env = super()._build_env(call)
-        env["DSH_PERMISSION_MODE"] = "read-only" if call.read_only else "danger-full-access"
+        if call.read_only:
+            env["DSH_PERMISSION_MODE"] = "read-only"
+        elif self._auto_approval_allowed(call):
+            env["DSH_PERMISSION_MODE"] = "danger-full-access"
+        else:
+            env["DSH_PERMISSION_MODE"] = "workspace-write"
         # The headless patch reads this temporary PTC opt-in; leaving it unset
         # leaves the agent without bash/fs tools.
         env.setdefault("DSH_TOOLS_MODE", "native")
@@ -623,7 +629,7 @@ class _BuiltinDeepSeekRuntime:
         if not command:
             return "[tool error] command is required"
         timeout = max(1, min(int(arguments.get("timeout") or 120), 300))
-        env = dict(self.adapter.env)
+        env = scrub_subprocess_env(dict(self.adapter.env))
         env.update({"HARNESS_MESH_TASK_ID": self.call.task_id, "HARNESS_MESH_ASSIGNMENT_ID": self.call.assignment_id})
         try:
             process = await asyncio.create_subprocess_shell(

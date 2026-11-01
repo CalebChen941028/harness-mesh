@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -14,6 +16,9 @@ from typing import Any, Iterable, Mapping
 
 from .config import cap_text
 from .models import ContinuationCheckpoint, TaskRequest, utc_now
+from .security import is_sensitive_path, sensitive_git_pathspecs
+
+logger = logging.getLogger(__name__)
 
 
 class WorkspaceError(RuntimeError):
@@ -27,6 +32,7 @@ class WorktreeInfo:
     branch: str
     reused: bool = False
     baseline_commit: str | None = None
+    escaping_symlinks: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -35,6 +41,7 @@ class Changes:
     modified_files: list[str] = field(default_factory=list)
     diff: str = ""
     base_ref: str = "HEAD"
+    skipped_sensitive: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -45,6 +52,7 @@ class ApplyResult:
     used_fallback: bool = False
     detail: str = ""
     branch: str | None = None
+    warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -54,6 +62,7 @@ class ApplyResult:
             "used_fallback": self.used_fallback,
             "detail": self.detail,
             "branch": self.branch,
+            "warnings": self.warnings,
         }
 
 
@@ -77,6 +86,7 @@ class WorkspaceManager:
         git_binary: str = "git",
         env: Mapping[str, str] | None = None,
         baseline_ref: str = "HEAD",
+        auto_init_repo: bool = False,
     ):
         self.workspace_root = Path(workspace_root).expanduser().resolve()
         state_candidate = Path(os.path.expanduser(str(state_dir_name)))
@@ -84,12 +94,14 @@ class WorkspaceManager:
         self.worktrees_root = self.state_dir / "worktrees"
         self.mcp_dir = self.state_dir / "mcp"
         self.tmp_dir = self.state_dir / "tmp"
+        self.git_guard_dir = self.state_dir / "git-guards"
         self.git_binary = git_binary
         self.env = dict(os.environ)
         if env:
             self.env.update(env)
         self.env.setdefault("GIT_TERMINAL_PROMPT", "0")
         self.baseline_ref = baseline_ref
+        self.auto_init_repo = bool(auto_init_repo)
 
     # ------------------------------------------------------------------
     # low-level git helpers
@@ -103,7 +115,20 @@ class WorkspaceManager:
         timeout: int = 120,
         input_text: str | None = None,
     ) -> subprocess.CompletedProcess:
-        command = [self.git_binary, *args]
+        command = [
+            self.git_binary,
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.pager=cat",
+            "-c",
+            "diff.external=",
+            "-c",
+            "protocol.ext.allow=never",
+            *args,
+        ]
         try:
             process = subprocess.run(
                 command,
@@ -124,6 +149,86 @@ class WorkspaceManager:
                 f"stdout: {process.stdout}\nstderr: {process.stderr}"
             )
         return process
+
+    def _git_common_dir(self) -> Path | None:
+        result = self._git(["rev-parse", "--git-common-dir"], cwd=self.workspace_root)
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        common = Path(result.stdout.strip())
+        if not common.is_absolute():
+            common = (self.workspace_root / common).resolve()
+        return common
+
+    @staticmethod
+    def _hash_file(path: Path) -> str | None:
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return None
+
+    def _git_metadata_snapshot(self) -> dict:
+        common = self._git_common_dir()
+        if common is None:
+            return {}
+        config = common / "config"
+        config_hash = self._hash_file(config) if config.exists() else None
+        attributes = common / "info" / "attributes"
+        attributes_hash = self._hash_file(attributes) if attributes.exists() else None
+        hooks = common / "hooks"
+        hook_hashes: dict[str, str] = {}
+        if hooks.is_dir():
+            for entry in sorted(hooks.rglob("*")):
+                if entry.is_file() and not entry.is_symlink():
+                    digest = self._hash_file(entry)
+                    if digest is not None:
+                        hook_hashes[entry.relative_to(hooks).as_posix()] = digest
+        return {"config": config_hash, "attributes": attributes_hash, "hooks": hook_hashes}
+
+    def _git_guard_path(self, task_id: str) -> Path:
+        safe = _SAFE_TASK_ID.sub("_", task_id)
+        return self.git_guard_dir / f"{safe}.json"
+
+    def _record_git_guard(self, task_id: str) -> None:
+        guard_path = self._git_guard_path(task_id)
+        if guard_path.exists():
+            return
+        try:
+            snapshot = self._git_metadata_snapshot()
+            self.git_guard_dir.mkdir(parents=True, exist_ok=True)
+            payload = {"task_id": task_id, "snapshot": snapshot}
+            guard_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        except OSError as exc:
+            logger.warning("unable to record Git metadata guard for %s: %s", task_id, exc)
+
+    def verify_git_guard(self, task_id: str) -> None:
+        self._verify_git_guard(task_id)
+
+    def _verify_git_guard(self, task_id: str) -> None:
+        guard_path = self._git_guard_path(task_id)
+        if not guard_path.exists():
+            logger.warning("no Git metadata guard recorded for %s; applying without comparison", task_id)
+            return
+        try:
+            saved = json.loads(guard_path.read_text(encoding="utf-8")).get("snapshot", {})
+        except (OSError, json.JSONDecodeError):
+            raise WorkspaceError(f"Git metadata guard for {task_id} is unreadable")
+        current = self._git_metadata_snapshot()
+        if saved == current:
+            return
+        changes: list[str] = []
+        if saved.get("config") != current.get("config"):
+            changes.append(".git/config changed")
+        if saved.get("attributes") != current.get("attributes"):
+            changes.append(".git/info/attributes changed")
+        old_hooks = saved.get("hooks") or {}
+        new_hooks = current.get("hooks") or {}
+        for name in sorted(set(old_hooks) | set(new_hooks)):
+            if old_hooks.get(name) != new_hooks.get(name):
+                action = "added" if name not in old_hooks else "removed" if name not in new_hooks else "modified"
+                changes.append(f".git/hooks/{name} {action}")
+        raise WorkspaceError(
+            f"Git metadata changed since task {task_id} started: {'; '.join(changes)}"
+        )
 
     def is_git_repo(self, path: Path | None = None) -> bool:
         target = path or self.workspace_root
@@ -151,11 +256,16 @@ class WorkspaceManager:
 
         self.workspace_root.mkdir(parents=True, exist_ok=True)
         if not self.is_git_repo() or not self._is_repo_toplevel():
+            if not self.auto_init_repo:
+                raise WorkspaceError(
+                    f"workspace is not a Git repository: {self.workspace_root}; "
+                    "run `git init` there or set auto_init_repo: true in harness-mesh config"
+                )
             self._git(["init", "-q"], check=True)
-        self._exclude_state_dir()
+        self._ensure_git_excludes()
         head = self._git(["rev-parse", "--verify", "HEAD"])
         if head.returncode != 0:
-            self._git(["add", "-A", "--", "."], check=True)
+            self._git(["add", "-A", "--", ".", *sensitive_git_pathspecs()], check=True)
             self._git(
                 [
                     "-c",
@@ -171,7 +281,7 @@ class WorkspaceManager:
                 check=True,
             )
 
-    def _exclude_state_dir(self) -> None:
+    def _ensure_git_excludes(self) -> None:
         git_dir = self._git(["rev-parse", "--git-dir"], cwd=self.workspace_root)
         if git_dir.returncode != 0:
             return
@@ -181,18 +291,20 @@ class WorkspaceManager:
         info_dir = git_dir_path / "info"
         info_dir.mkdir(parents=True, exist_ok=True)
         exclude_file = info_dir / "exclude"
-        existing = ""
-        if exclude_file.exists():
-            existing = exclude_file.read_text(encoding="utf-8", errors="replace")
+        existing = exclude_file.read_text(encoding="utf-8", errors="replace") if exclude_file.exists() else ""
+        entries: list[str] = []
         relative_state = self.state_dir.relative_to(self.workspace_root) if self._is_relative_to(
             self.state_dir, self.workspace_root
         ) else None
-        entry = f"/{relative_state.as_posix()}/" if relative_state else str(self.state_dir)
-        if entry not in existing.splitlines():
+        entries.append(f"/{relative_state.as_posix()}/" if relative_state else str(self.state_dir))
+        existing_lines = set(existing.splitlines())
+        additions = [entry for entry in entries if entry not in existing_lines]
+        if additions:
             with exclude_file.open("a", encoding="utf-8") as handle:
                 if existing and not existing.endswith("\n"):
                     handle.write("\n")
-                handle.write(entry + "\n")
+                for entry in additions:
+                    handle.write(entry + "\n")
 
     @staticmethod
     def _is_relative_to(path: Path, parent: Path) -> bool:
@@ -277,6 +389,7 @@ class WorkspaceManager:
         sync_uncommitted: bool = True,
     ) -> WorktreeInfo:
         self.ensure_repository()
+        self._record_git_guard(task_id)
         path = self.worktree_path(task_id)
         branch = self.branch_name(task_id)
         if path.exists():
@@ -324,8 +437,90 @@ class WorkspaceManager:
             self._commit_worktree_baseline(task_id, path, "harness-mesh: baseline sync")
         head = self._git(["rev-parse", "HEAD"], cwd=path)
         info.baseline_commit = head.stdout.strip() if head.returncode == 0 else None
+        info.escaping_symlinks = self._normalize_worktree_symlinks(path)
         self._write_baseline_marker(info)
+        self._write_lineage_marker(path, task_id)
         return info
+
+    def _write_lineage_marker(self, worktree_path: Path, task_id: str) -> None:
+        marker = worktree_path / ".harness-mesh-lineage.json"
+        try:
+            marker.write_text(json.dumps({"task_id": task_id}), encoding="utf-8")
+            marker.chmod(0o444)
+        except OSError as exc:
+            logger.warning("unable to write lineage marker for %s: %s", task_id, exc)
+
+    def _recreate_symlink(
+        self,
+        source: Path,
+        destination: Path,
+        source_root: Path,
+        destination_root: Path,
+    ) -> bool:
+        """Recreate an internal symlink as a relative link inside the destination."""
+
+        if not source.is_symlink() or not source.exists():
+            logger.warning("skipping symlink %s: dangling or missing target", source)
+            return False
+        try:
+            resolved = source.resolve()
+        except OSError:
+            logger.warning("skipping symlink %s: cannot resolve target", source)
+            return False
+        if is_sensitive_path(resolved):
+            logger.warning("skipping symlink %s: target name is sensitive", source)
+            return False
+        try:
+            relative_target = resolved.relative_to(source_root.resolve())
+        except ValueError:
+            logger.warning("skipping symlink %s: target escapes source workspace", source)
+            return False
+        destination_target = destination_root.resolve() / relative_target
+        if not self._is_relative_to(destination_target, destination_root.resolve()):
+            logger.warning("skipping symlink %s: destination target escapes workspace", source)
+            return False
+        link_target = os.path.relpath(destination_target, destination.parent)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.is_symlink() or destination.exists():
+            if destination.is_dir() and not destination.is_symlink():
+                raise WorkspaceError(f"cannot replace directory with symlink: {destination}")
+            destination.unlink()
+        os.symlink(link_target, destination)
+        return True
+
+    def _normalize_worktree_symlinks(self, worktree_path: Path) -> list[str]:
+        """Rewrite absolute links inside the worktree and report escaping links."""
+
+        worktree_root = worktree_path.resolve()
+        primary_root = self.workspace_root.resolve()
+        escaping: list[str] = []
+        for entry in sorted(worktree_path.rglob("*")):
+            if not entry.is_symlink():
+                continue
+            if not entry.exists():
+                escaping.append(entry.relative_to(worktree_path).as_posix())
+                continue
+            try:
+                resolved = entry.resolve(strict=False)
+            except OSError:
+                escaping.append(entry.relative_to(worktree_path).as_posix())
+                continue
+            if self._is_relative_to(resolved, worktree_root):
+                raw_target = os.readlink(entry)
+                if Path(raw_target).is_absolute():
+                    entry.unlink()
+                    os.symlink(os.path.relpath(resolved, entry.parent), entry)
+                continue
+            if self._is_relative_to(resolved, primary_root) and not is_sensitive_path(resolved):
+                relative_target = resolved.relative_to(primary_root)
+                destination_target = worktree_root / relative_target
+                entry.unlink()
+                os.symlink(os.path.relpath(destination_target, entry.parent), entry)
+                continue
+            relative = entry.relative_to(worktree_path).as_posix()
+            escaping.append(relative)
+            logger.warning("worktree symlink escapes workspace: %s", relative)
+        return sorted(set(escaping))
 
     def _sync_uncommitted_changes(self, worktree_path: Path) -> None:
         """Copy the primary checkout's uncommitted state into a new worktree.
@@ -348,11 +543,13 @@ class WorkspaceManager:
         status = self._git(["status", "--porcelain", "-z"], cwd=self.workspace_root)
         if status.returncode == 0:
             for relative in self._parse_porcelain_paths(status.stdout):
-                if self._is_state_path(relative):
+                if self._is_state_path(relative) or is_sensitive_path(relative):
                     continue
                 src = self.workspace_root / relative
                 dst = worktree_path / relative
-                if src.is_file():
+                if src.is_symlink():
+                    self._recreate_symlink(src, dst, self.workspace_root, worktree_path)
+                elif src.is_file():
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(src, dst)
                 elif not src.exists() and dst.exists():
@@ -363,9 +560,13 @@ class WorkspaceManager:
         if status.returncode != 0:
             return
         for relative in self._parse_porcelain_paths(status.stdout):
+            if self._is_state_path(relative) or is_sensitive_path(relative):
+                continue
             src = self.workspace_root / relative
             dst = worktree_path / relative
-            if src.is_file():
+            if src.is_symlink():
+                self._recreate_symlink(src, dst, self.workspace_root, worktree_path)
+            elif src.is_file():
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dst)
             elif not src.exists() and dst.exists():
@@ -389,6 +590,8 @@ class WorkspaceManager:
         return paths
 
     def _is_state_path(self, relative: str) -> bool:
+        if Path(relative).name == ".harness-mesh-lineage.json":
+            return True
         try:
             state_rel = self.state_dir.resolve().relative_to(self.workspace_root)
         except ValueError:
@@ -396,7 +599,7 @@ class WorkspaceManager:
         return relative == state_rel.as_posix() or relative.startswith(state_rel.as_posix() + "/")
 
     def _commit_worktree_baseline(self, task_id: str, worktree_path: Path, message: str) -> str | None:
-        self._git(["add", "-A", "--", "."], cwd=worktree_path)
+        self._git(["add", "-A", "--", ".", *sensitive_git_pathspecs()], cwd=worktree_path)
         result = self._git(
             [
                 "-c",
@@ -515,12 +718,19 @@ class WorkspaceManager:
         # ``git add -N`` records intent-to-add so that brand-new files appear in
         # the diff with their full content.  It does not stage content,
         # therefore it is safe inside an isolated worktree.
+        excludes = [
+            *sensitive_git_pathspecs(),
+            ":(exclude).harness-mesh-lineage.json",
+            ":(exclude)**/.harness-mesh-lineage.json",
+        ]
         if stage_untracked:
-            self._git(["add", "-N", "--", "."], cwd=target)
-        result = self._git(["diff", ref, "--no-color", "--", "."], cwd=target)
+            self._git(["add", "-N", "--", ".", *excludes], cwd=target)
+        result = self._git(
+            ["diff", "--no-ext-diff", ref, "--no-color", "--", ".", *excludes], cwd=target
+        )
         if result.returncode != 0:
             # A repository without commits: show the staged/worktree diff instead.
-            result = self._git(["diff", "--no-color"], cwd=target)
+            result = self._git(["diff", "--no-ext-diff", "--no-color"], cwd=target)
         return result.stdout
 
     def diff_files(self, path: str | Path, *, base_ref: str | None = None) -> list[str]:
@@ -528,7 +738,20 @@ class WorkspaceManager:
         if not self.is_git_repo(target):
             return []
         ref = base_ref or self.baseline_for_path(target) or "HEAD"
-        result = self._git(["diff", "--name-only", ref, "--", "."], cwd=target)
+        result = self._git(
+            [
+                "diff",
+                "--no-ext-diff",
+                "--name-only",
+                ref,
+                "--",
+                ".",
+                *sensitive_git_pathspecs(),
+                ":(exclude).harness-mesh-lineage.json",
+                ":(exclude)**/.harness-mesh-lineage.json",
+            ],
+            cwd=target,
+        )
         if result.returncode != 0:
             return []
         return [line.strip() for line in result.stdout.splitlines() if line.strip()]
@@ -543,13 +766,29 @@ class WorkspaceManager:
         target = Path(path)
         ref = base_ref or self.baseline_for_path(target)
         diff = self.collect_diff(target, stage_untracked=stage_untracked, base_ref=ref)
-        files = set(self.modified_files(target))
-        files.update(self.diff_files(target, base_ref=ref))
+        raw_files = {
+            path
+            for path in set(self.modified_files(target)) | set(self.diff_files(target, base_ref=ref))
+            if not self._is_state_path(path)
+        }
+        skipped: list[str] = []
+        for path in sorted(raw_files):
+            if not is_sensitive_path(path):
+                continue
+            candidate = target / path
+            if candidate.is_dir() and not candidate.is_symlink():
+                for child in sorted(candidate.rglob("*")):
+                    if child.is_file() or child.is_symlink():
+                        skipped.append(child.relative_to(target).as_posix())
+            else:
+                skipped.append(path)
+        visible = sorted(path for path in raw_files if not is_sensitive_path(path))
         return Changes(
             worktree_path=str(target),
-            modified_files=sorted(files),
+            modified_files=visible,
             diff=diff,
             base_ref=ref or "HEAD",
+            skipped_sensitive=skipped,
         )
 
     def capture_checkpoint(
@@ -598,10 +837,18 @@ class WorkspaceManager:
             raise WorkspaceError(f"worktree does not exist for task {task_id}: {source}")
         if source.resolve() == target.resolve():
             return ApplyResult(task_id=task_id, strategy=strategy, detail="already in the primary workspace")
+        self._verify_git_guard(task_id)
         changes = self.collect_changes(source)
+        self._check_diff_symlinks(changes.diff, source, target)
         if strategy == "copy":
             applied = self._copy_changes(source, target, changes.modified_files)
-            return ApplyResult(task_id=task_id, strategy=strategy, applied_files=applied, detail="copied files")
+            return ApplyResult(
+                task_id=task_id,
+                strategy=strategy,
+                applied_files=applied,
+                detail="copied files",
+                warnings=list(changes.skipped_sensitive),
+            )
         if strategy not in {"patch", "merge"}:
             raise ValueError(f"unsupported apply strategy: {strategy}")
         if not changes.diff.strip():
@@ -611,6 +858,13 @@ class WorkspaceManager:
         patch_args = ["apply", "--whitespace=nowarn", "--recount"]
         if strategy == "merge":
             patch_args.append("--3way")
+        preflight = self._git([*patch_args, "--check", "-"], cwd=target, input_text=changes.diff)
+        if preflight.returncode != 0:
+            conflicts = self._conflict_files(preflight.stderr + preflight.stdout, changes.modified_files)
+            raise WorkspaceError(
+                f"patch preflight failed for task {task_id}; conflicting files: "
+                f"{', '.join(conflicts) if conflicts else 'unknown'}; primary workspace left untouched"
+            )
         result = self._git([*patch_args, "-"], cwd=target, input_text=changes.diff)
         if result.returncode == 0:
             return ApplyResult(
@@ -618,6 +872,7 @@ class WorkspaceManager:
                 strategy=strategy,
                 applied_files=list(changes.modified_files),
                 detail="patch applied",
+                warnings=list(changes.skipped_sensitive),
             )
         conflict_detail = result.stderr.strip() or result.stdout.strip()
         if strategy == "merge":
@@ -640,6 +895,52 @@ class WorkspaceManager:
             detail=f"patch failed, copied files instead: {result.stderr.strip()[:500]}",
         )
 
+    @staticmethod
+    def _conflict_files(output: str, changed_files: Iterable[str]) -> list[str]:
+        conflicts: list[str] = []
+        for match in re.findall(r"patch failed: ([^:\n]+):", output):
+            name = match.strip()
+            if name and name not in conflicts:
+                conflicts.append(name)
+        if not conflicts:
+            for name in changed_files:
+                if name and name in output and name not in conflicts:
+                    conflicts.append(name)
+        return conflicts
+
+    def _check_diff_symlinks(self, diff: str, source: Path, target_root: Path) -> None:
+        path: str | None = None
+        symlink_mode = False
+        for line in diff.splitlines():
+            if line.startswith("diff --git "):
+                path = None
+                symlink_mode = False
+                continue
+            if line.startswith("new file mode 120000") or (
+                line.startswith("index ") and "120000" in line
+            ):
+                symlink_mode = True
+                continue
+            if line.startswith("+++ b/"):
+                path = line[6:].strip()
+                continue
+            if not symlink_mode or path is None or not line.startswith("+"):
+                continue
+            raw_target = line[1:].strip()
+            target_path = Path(raw_target)
+            if not target_path.is_absolute():
+                target_path = (source / path).parent / target_path
+            try:
+                resolved = target_path.resolve(strict=False)
+            except OSError:
+                resolved = target_path
+            if not self._is_relative_to(resolved, target_root.resolve()):
+                raise WorkspaceError(
+                    f"symlink {path} points outside the target workspace: {raw_target}"
+                )
+            path = None
+            symlink_mode = False
+
     def _copy_changes(self, source: Path, target: Path, files: Iterable[str]) -> list[str]:
         applied: list[str] = []
         target_resolved = target.resolve()
@@ -647,8 +948,16 @@ class WorkspaceManager:
             rel_path = Path(relative)
             if rel_path.is_absolute() or ".." in rel_path.parts:
                 raise WorkspaceError(f"refusing unsafe worktree path: {relative}")
-            src = (source / rel_path).resolve()
-            dst = (target / rel_path).resolve()
+            if is_sensitive_path(rel_path) or self._is_state_path(relative):
+                continue
+            src_path = source / rel_path
+            dst_path = target / rel_path
+            if src_path.is_symlink():
+                if self._recreate_symlink(src_path, dst_path, source, target):
+                    applied.append(relative)
+                continue
+            src = src_path.resolve()
+            dst = dst_path.resolve()
             if not self._is_relative_to(src, source.resolve()) or not self._is_relative_to(dst, target_resolved):
                 raise WorkspaceError(f"refusing path escaping workspace: {relative}")
             if src.is_file():

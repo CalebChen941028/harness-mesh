@@ -14,6 +14,7 @@ The ledger keeps the five pieces of state that must survive a process restart:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -30,6 +31,7 @@ from .models import (
     TaskResourcePage,
     TaskResult,
     TaskStatus,
+    utc_now,
 )
 
 
@@ -43,6 +45,19 @@ class TaskNotFoundError(StateStoreError):
 
 class ResourceNotFoundError(StateStoreError):
     pass
+
+
+def _pid_alive(pid: int) -> bool:
+    """True while the process exists (zombies still count as alive)."""
+
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError, ValueError):
+        # A permission error means the pid exists but belongs to another user.
+        return True
+    return True
 
 
 _SCHEMA = """
@@ -112,9 +127,13 @@ CREATE TABLE IF NOT EXISTS assignments (
     error_reason TEXT,
     duration_ms INTEGER,
     exit_code INTEGER,
-    session_id TEXT
+    session_id TEXT,
+    call_depth INTEGER NOT NULL DEFAULT 0,
+    trace_chain TEXT NOT NULL DEFAULT '[]',
+    pid INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_assignments_task ON assignments(task_id, attempt);
+CREATE INDEX IF NOT EXISTS idx_assignments_status ON assignments(status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_assignments_task_attempt_unique ON assignments(task_id, attempt);
 
 CREATE TABLE IF NOT EXISTS failover_hops (
@@ -150,6 +169,7 @@ CREATE TABLE IF NOT EXISTS project_context_entries (
     content TEXT NOT NULL,
     author_harness TEXT NOT NULL DEFAULT 'controller',
     task_id TEXT,
+    source TEXT NOT NULL DEFAULT 'controller',
     updated_at REAL NOT NULL
 );
 
@@ -176,7 +196,32 @@ class StateStore:
         self._conn.execute("PRAGMA foreign_keys=ON")
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(project_context_entries)").fetchall()
+        }
+        if "source" not in columns:
+            self._conn.execute(
+                "ALTER TABLE project_context_entries ADD COLUMN source TEXT NOT NULL DEFAULT 'controller'"
+            )
+        # Assignments gained the exact lineage handed to the adapter plus the
+        # spawned harness pid.  Old databases keep working because the new
+        # columns carry defaults (a NULL pid means "unknown, assume alive").
+        assignment_columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(assignments)").fetchall()
+        }
+        for name, ddl in (
+            ("call_depth", "INTEGER NOT NULL DEFAULT 0"),
+            ("trace_chain", "TEXT NOT NULL DEFAULT '[]'"),
+            ("pid", "INTEGER"),
+        ):
+            if name not in assignment_columns:
+                self._conn.execute(f"ALTER TABLE assignments ADD COLUMN {name} {ddl}")
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -445,22 +490,26 @@ class StateStore:
         category: str = "note",
         author_harness: str = "controller",
         task_id: str | None = None,
+        source: str = "controller",
     ) -> dict[str, Any]:
         now = time.time()
+        key = str(key).strip()[:128] or "untitled"
+        content = str(content)[:4000]
         with self._lock:
             self._conn.execute(
                 """
                 INSERT INTO project_context_entries
-                    (key, category, content, author_harness, task_id, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (key, category, content, author_harness, task_id, source, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(key) DO UPDATE SET
                     category=excluded.category,
                     content=excluded.content,
                     author_harness=excluded.author_harness,
                     task_id=excluded.task_id,
+                    source=excluded.source,
                     updated_at=excluded.updated_at
                 """,
-                (key, category, content, author_harness, task_id, now),
+                (key, category, content, author_harness, task_id, source, now),
             )
             self._conn.commit()
         return {
@@ -469,6 +518,7 @@ class StateStore:
             "content": content,
             "author_harness": author_harness,
             "task_id": task_id,
+            "source": source,
             "updated_at": now,
         }
 
@@ -674,18 +724,24 @@ class StateStore:
     # assignments and failover hops
     # ------------------------------------------------------------------
     def add_assignment(self, record: AssignmentRecord) -> AssignmentRecord:
+        # Until the adapter reports the harness pid, the dispatching process
+        # owns the assignment.  Recording it immediately keeps the global
+        # active-assignment count honest even before the child exists.
+        pid = record.pid if record.pid is not None else os.getpid()
         with self._lock:
             self._conn.execute(
                 """
                 INSERT INTO assignments
                     (assignment_id, task_id, attempt, harness, model, status, started_at,
-                     ended_at, report_summary, error_reason, duration_ms, exit_code, session_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     ended_at, report_summary, error_reason, duration_ms, exit_code, session_id,
+                     call_depth, trace_chain, pid)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(assignment_id) DO UPDATE SET
                     status=excluded.status, ended_at=excluded.ended_at,
                     report_summary=excluded.report_summary, error_reason=excluded.error_reason,
                     duration_ms=excluded.duration_ms, exit_code=excluded.exit_code,
-                    session_id=excluded.session_id
+                    session_id=excluded.session_id, call_depth=excluded.call_depth,
+                    trace_chain=excluded.trace_chain, pid=excluded.pid
                 """,
                 (
                     record.assignment_id,
@@ -701,10 +757,13 @@ class StateStore:
                     record.duration_ms,
                     record.exit_code,
                     record.session_id,
+                    int(record.call_depth),
+                    json.dumps(list(record.trace_chain)),
+                    pid,
                 ),
             )
             self._conn.commit()
-        return record
+        return record.model_copy(update={"pid": pid})
 
     def update_assignment(self, assignment_id: str, **fields: Any) -> None:
         allowed = {
@@ -715,12 +774,17 @@ class StateStore:
             "duration_ms",
             "exit_code",
             "session_id",
+            "call_depth",
+            "trace_chain",
+            "pid",
         }
         updates: list[str] = []
         params: list[Any] = []
         for key, value in fields.items():
             if key not in allowed:
                 raise ValueError(f"cannot update assignment column: {key}")
+            if key == "trace_chain" and not isinstance(value, str):
+                value = json.dumps([str(item) for item in value])
             updates.append(f"{key}=?")
             params.append(value)
         if not updates:
@@ -730,29 +794,82 @@ class StateStore:
             self._conn.execute(f"UPDATE assignments SET {', '.join(updates)} WHERE assignment_id=?", tuple(params))
             self._conn.commit()
 
+    @staticmethod
+    def _row_to_assignment(row: sqlite3.Row) -> AssignmentRecord:
+        try:
+            trace = json.loads(row["trace_chain"] or "[]")
+        except json.JSONDecodeError:
+            trace = []
+        return AssignmentRecord(
+            assignment_id=row["assignment_id"],
+            task_id=row["task_id"],
+            attempt=row["attempt"],
+            harness=row["harness"],
+            model=row["model"],
+            status=row["status"],
+            started_at=row["started_at"],
+            ended_at=row["ended_at"],
+            report_summary=row["report_summary"],
+            error_reason=row["error_reason"],
+            duration_ms=row["duration_ms"],
+            exit_code=row["exit_code"],
+            session_id=row["session_id"],
+            call_depth=int(row["call_depth"] or 0),
+            trace_chain=[str(item) for item in trace],
+            pid=int(row["pid"]) if row["pid"] is not None else None,
+        )
+
     def list_assignments(self, task_id: str) -> list[AssignmentRecord]:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM assignments WHERE task_id=? ORDER BY attempt, started_at", (task_id,)
             ).fetchall()
-        return [
-            AssignmentRecord(
-                assignment_id=row["assignment_id"],
-                task_id=row["task_id"],
-                attempt=row["attempt"],
-                harness=row["harness"],
-                model=row["model"],
-                status=row["status"],
-                started_at=row["started_at"],
-                ended_at=row["ended_at"],
-                report_summary=row["report_summary"],
-                error_reason=row["error_reason"],
-                duration_ms=row["duration_ms"],
-                exit_code=row["exit_code"],
-                session_id=row["session_id"],
+        return [self._row_to_assignment(row) for row in rows]
+
+    def list_running_assignments(self) -> list[AssignmentRecord]:
+        """Every assignment still marked running, oldest first."""
+
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM assignments WHERE status='running' ORDER BY started_at, attempt"
+            ).fetchall()
+        return [self._row_to_assignment(row) for row in rows]
+
+    def get_running_assignment(self, task_id: str) -> AssignmentRecord | None:
+        """The newest running assignment for one ticket, if any."""
+
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM assignments WHERE task_id=? AND status='running' "
+                "ORDER BY attempt DESC, started_at DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+        return self._row_to_assignment(row) if row is not None else None
+
+    def count_live_assignments(self) -> int:
+        """Count running assignments whose process is still alive.
+
+        A row whose pid no longer exists is a leftover from a crashed host; it
+        is closed as ``ended_error``/``stale`` instead of occupying a slot
+        forever.  Rows without a pid predate the column and are treated as
+        alive because their owner cannot be proven dead.
+        """
+
+        live = 0
+        stale: list[str] = []
+        for record in self.list_running_assignments():
+            if record.pid is None or _pid_alive(record.pid):
+                live += 1
+            else:
+                stale.append(record.assignment_id)
+        for assignment_id in stale:
+            self.update_assignment(
+                assignment_id,
+                status="ended_error",
+                ended_at=utc_now(),
+                error_reason="stale",
             )
-            for row in rows
-        ]
+        return live
 
     def add_failover_hop(self, task_id: str, hop: FailoverHop) -> FailoverHop:
         with self._lock:

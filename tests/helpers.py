@@ -237,7 +237,7 @@ def make_mesh(
         cache_ttl_seconds=300,
     )
     skills = SkillPluginManager(config, workspace, home_dir=home, env=env_map)
-    workspace_manager = WorkspaceManager(workspace, config.state_dir)
+    workspace_manager = WorkspaceManager(workspace, config.state_dir, auto_init_repo=True)
     guardian = QuotaGuardian(
         storage,
         cooldown_seconds=1,

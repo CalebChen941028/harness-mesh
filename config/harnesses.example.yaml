@@ -13,10 +13,18 @@
 # example `--model {model}` when the harness should use its own active model).
 
 state_dir: .harness-mesh
+# Optional allowlist for request-level workspace_root values. Empty means
+# only the service startup workspace is allowed.
+allowed_workspace_roots: []
+# Refuse to create a repository automatically; require `git init` first.
+auto_init_repo: false
+# Keep shared_write worktrees read-only unless this is explicitly enabled.
+auto_approve_shared_write: false
 summary_max_chars: 1500
 diff_preview_max_chars: 4000
 default_timeout_seconds: 1800
 max_call_depth: 3
+max_active_assignments: 8
 max_failover_attempts: 4
 transient_retries: 1
 quota_cooldown_seconds: 300

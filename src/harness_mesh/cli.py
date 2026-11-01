@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -12,6 +13,12 @@ import typer
 
 from .config import find_config_path, load_config
 from .installer import HarnessInstaller
+from .lineage import (
+    _effective_call_depth,
+    _merge_trace_chain,
+    _resolved_lineage,
+    _workspace_from_cwd,
+)
 from .models import (
     QuotaExhaustedPolicy,
     TaskDifficulty,
@@ -19,6 +26,7 @@ from .models import (
     WorkspaceMode,
 )
 from .router import create_mesh_runtime
+from .security import ensure_service_workspace
 
 app = typer.Typer(
     add_completion=False,
@@ -49,16 +57,44 @@ def main(
 
     ctx.obj = {
         "config": config,
-        "workspace": workspace or os.environ.get("HARNESS_MESH_WORKSPACE") or os.getcwd(),
+        "workspace": workspace or os.environ.get("HARNESS_MESH_WORKSPACE") or _workspace_from_cwd(),
     }
 
 
 def _runtime(ctx: typer.Context):
     options = ctx.obj or {}
-    return create_mesh_runtime(
-        config_path=options.get("config"),
-        workspace_root=options.get("workspace") or os.getcwd(),
-    )
+    workspace = options.get("workspace") or _workspace_from_cwd()
+    try:
+        return create_mesh_runtime(
+            config_path=options.get("config"),
+            workspace_root=workspace,
+        )
+    except RuntimeError as exc:
+        typer.echo(f"Cannot start harness-mesh from this workspace: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+def _trace_chain_option(raw: str | None) -> list[str] | None:
+    """Parse ``--trace-chain`` the same way the MCP tool accepts its list."""
+
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(payload, list):
+        return [str(item) for item in payload]
+    return None
+
+
+def _echo_install_results(results) -> None:
+    for result in results:
+        typer.echo(f"{result.harness:12} {result.action:12} {result.detail}")
+        for path in result.files:
+            typer.echo(f"  file: {path}")
+        for command in result.commands:
+            typer.echo(f"  cmd : {' '.join(command)}")
 
 
 @app.command()
@@ -69,31 +105,97 @@ def install(
     ),
     uninstall: bool = typer.Option(False, "--uninstall", help="Remove the MCP/plugin integration."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show planned commands/files without changing anything."),
+    yes: bool = typer.Option(False, "--yes", help="Skip the interactive confirmation."),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
 ) -> None:
     """One-command installation of Harness-Mesh into every detected harness UI."""
 
     options = ctx.obj or {}
-    workspace = options.get("workspace") or os.getcwd()
+    workspace = options.get("workspace") or _workspace_from_cwd()
+    config_path = options.get("config")
+    config = load_config(config_path, workspace)
+    try:
+        ensure_service_workspace(workspace, auto_init_repo=config.auto_init_repo)
+    except RuntimeError as exc:
+        typer.echo(f"Cannot install from this workspace: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    def build(dry: bool):
+        return HarnessInstaller(
+            config,
+            workspace,
+            config_path=config_path or find_config_path(workspace),
+            dry_run=dry,
+        )
+
+    planned = build(True).install(harness, uninstall=uninstall)
+    if json_output and dry_run:
+        typer.echo(_json([result.as_dict() for result in planned]))
+        return
+    if not json_output:
+        typer.echo("Planned changes:")
+        _echo_install_results(planned)
+    if dry_run:
+        return
+    if not yes:
+        if not sys.stdin.isatty():
+            typer.echo(
+                "Refusing to modify harness configuration in a non-interactive environment; "
+                "re-run with --yes or inspect with --dry-run.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if not typer.confirm("Apply these changes?"):
+            typer.echo("Cancelled.")
+            raise typer.Exit(code=0)
+    results = build(False).install(harness, uninstall=uninstall)
+    if json_output:
+        typer.echo(_json([result.as_dict() for result in results]))
+    else:
+        typer.echo("Result:")
+        _echo_install_results(results)
+    if any(result.action == "failed" for result in results):
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def doctor(
+    ctx: typer.Context,
+    harness: Optional[list[str]] = typer.Option(
+        None, "--harness", "-H", help="Check only this harness (repeatable)."
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Check registered MCP/plugin commands and their launch health."""
+
+    options = ctx.obj or {}
+    workspace = options.get("workspace") or _workspace_from_cwd()
     config_path = options.get("config")
     config = load_config(config_path, workspace)
     installer = HarnessInstaller(
         config,
         workspace,
         config_path=config_path or find_config_path(workspace),
-        dry_run=dry_run,
     )
-    results = installer.install(harness, uninstall=uninstall)
+    results = installer.doctor(harness)
+    for result in results:
+        registration = installer._read_registration(result.harness)
+        if registration is None:
+            continue
+        registered_workspace = (registration.get("env") or {}).get("HARNESS_MESH_WORKSPACE")
+        if not registered_workspace:
+            continue
+        try:
+            ensure_service_workspace(registered_workspace, auto_init_repo=config.auto_init_repo)
+        except RuntimeError as exc:
+            result.status = "failed"
+            result.detail = f"registered workspace is invalid: {exc}"
     if json_output:
         typer.echo(_json([result.as_dict() for result in results]))
     else:
         for result in results:
-            typer.echo(f"{result.harness:12} {result.action:12} {result.detail}")
-            for path in result.files:
-                typer.echo(f"  file: {path}")
-            for command in result.commands:
-                typer.echo(f"  cmd : {' '.join(command)}")
-    if any(result.action == "failed" for result in results):
+            typer.echo(f"{result.harness:12} {result.status:14} {result.detail}")
+    if any(result.status == "failed" for result in results):
         raise typer.Exit(code=1)
 
 
@@ -237,47 +339,43 @@ def dispatch(
     context_file: Optional[list[str]] = typer.Option(None, "--context-file", help="Context file path (repeatable)."),
     auto_match_skills: bool = typer.Option(False, "--auto-match-skills"),
     call_depth: Optional[int] = typer.Option(
-        None, "--call-depth", help="Nested call depth (defaults to HARNESS_MESH_CALL_DEPTH)."
+        None,
+        "--call-depth",
+        help="Nested call depth; only raises the depth inherited from the environment or the ledger.",
     ),
     trace_chain: Optional[str] = typer.Option(
-        None, "--trace-chain", help="JSON list of ancestor harnesses (defaults to HARNESS_MESH_TRACE_CHAIN)."
+        None,
+        "--trace-chain",
+        help="JSON list of ancestor harnesses, merged with the environment and the ledger chain.",
     ),
     json_output: bool = typer.Option(True, "--json/--no-json"),
 ) -> None:
     """Dispatch a ticket and print the assignment result."""
 
-    options = ctx.obj or {}
-    resolved_depth = call_depth
-    if resolved_depth is None:
-        env_depth = os.environ.get("HARNESS_MESH_CALL_DEPTH")
-        resolved_depth = int(env_depth) if env_depth and env_depth.isdigit() else 0
-    resolved_trace: list[str] = []
-    raw_trace = trace_chain or os.environ.get("HARNESS_MESH_TRACE_CHAIN")
-    if raw_trace:
-        try:
-            parsed_trace = json.loads(raw_trace)
-            if isinstance(parsed_trace, list):
-                resolved_trace = [str(item) for item in parsed_trace]
-        except json.JSONDecodeError:
-            resolved_trace = []
-    request = TaskRequest(
-        target_harness=harness,
-        objective=objective,
-        difficulty=TaskDifficulty(difficulty),
-        model=model,
-        on_quota_exhausted=QuotaExhaustedPolicy(policy),
-        fallback_harnesses=list(fallback or []),
-        timeout_seconds=timeout,
-        workspace_mode=WorkspaceMode(workspace_mode),
-        workspace_root=options.get("workspace") or os.getcwd(),
-        context_files=list(context_file or []),
-        auto_match_skills=auto_match_skills,
-        call_depth=resolved_depth,
-        trace_chain=resolved_trace,
-        parent_task_id=os.environ.get("HARNESS_MESH_TASK_ID"),
-    )
+    # The command line is a reachable entry point for a worker shell, so it
+    # resolves lineage from the same ledger as the MCP server instead of
+    # trusting --call-depth or the (host-controlled) environment alone.
     runtime = _runtime(ctx)
     try:
+        lineage = _resolved_lineage(runtime.router)
+        inherited_depth = lineage.call_depth if lineage is not None else 0
+        inherited_trace = list(lineage.trace_chain) if lineage is not None else []
+        request = TaskRequest(
+            target_harness=harness,
+            objective=objective,
+            difficulty=TaskDifficulty(difficulty),
+            model=model,
+            on_quota_exhausted=QuotaExhaustedPolicy(policy),
+            fallback_harnesses=list(fallback or []),
+            timeout_seconds=timeout,
+            workspace_mode=WorkspaceMode(workspace_mode),
+            workspace_root=str(runtime.router.workspace_root),
+            context_files=list(context_file or []),
+            auto_match_skills=auto_match_skills,
+            call_depth=_effective_call_depth(call_depth, inherited_depth),
+            trace_chain=_merge_trace_chain(_trace_chain_option(trace_chain), inherited_trace),
+            parent_task_id=os.environ.get("HARNESS_MESH_TASK_ID"),
+        )
         result = asyncio.run(runtime.router.dispatch(request))
     finally:
         runtime.storage.close()
@@ -342,9 +440,18 @@ def apply(
     ctx: typer.Context,
     task_id: str = typer.Argument(...),
     strategy: str = typer.Option("patch", "--strategy", help="patch|merge|copy"),
+    force_copy: bool = typer.Option(
+        False, "--force-copy", help="Required to use the destructive copy strategy."
+    ),
 ) -> None:
     """Apply isolated worktree changes to the primary workspace."""
 
+    if strategy == "copy" and not force_copy:
+        typer.echo("copy strategy is destructive; pass --force-copy to confirm", err=True)
+        raise typer.Exit(code=2)
+    if strategy not in {"patch", "merge", "copy"}:
+        typer.echo(f"unsupported strategy: {strategy}", err=True)
+        raise typer.Exit(code=2)
     runtime = _runtime(ctx)
     try:
         payload = runtime.router.apply_task_patch(task_id, strategy=strategy)
@@ -363,7 +470,7 @@ def init_mcp(
     """Emit or install the MCP server entry for a controller harness."""
 
     options = ctx.obj or {}
-    workspace = options.get("workspace") or os.getcwd()
+    workspace = options.get("workspace") or _workspace_from_cwd()
     config = {
         "mcpServers": {
             "harness-mesh": {

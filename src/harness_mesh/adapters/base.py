@@ -42,9 +42,13 @@ class AdapterCall:
     trace_chain: list[str] = field(default_factory=list)
     call_depth: int = 0
     read_only: bool = False
+    shared_write: bool = False
     session_id: str | None = None
     skills: list[str] = field(default_factory=list)
     task: TaskRequest | None = None
+    # Called with the pid of the spawned harness process, right after the
+    # process exists.  The router uses it to record assignment lineage.
+    on_process_start: Callable[[int], None] | None = None
 
 
 @dataclass
@@ -216,6 +220,13 @@ class BaseHarnessAdapter:
         finally:
             shutil.rmtree(probe_dir, ignore_errors=True)
 
+    def _auto_approval_allowed(self, call: AdapterCall) -> bool:
+        if call.read_only:
+            return False
+        if call.shared_write and not self.config.auto_approve_shared_write:
+            return False
+        return bool(self.harness_config.auto_approve)
+
     def _auto_approve_args(self, default: list[str]) -> list[str]:
         configured = self.harness_config.extra.get("auto_approve_args")
         if isinstance(configured, list) and configured:
@@ -268,6 +279,7 @@ class BaseHarnessAdapter:
                 Path(call.workdir),
                 timeout=timeout,
                 env=env,
+                on_process_start=call.on_process_start,
             )
             outcome = AdapterOutcome(
                 exit_code=124 if timed_out else code,
@@ -342,6 +354,7 @@ class BaseHarnessAdapter:
         *,
         timeout: int = 1800,
         env: Mapping[str, str] | None = None,
+        on_process_start: Callable[[int], None] | None = None,
     ) -> tuple[int, str, str, bool]:
         args = [str(item) for item in args]
         if self._runner is not None:
@@ -361,6 +374,10 @@ class BaseHarnessAdapter:
             )
         except (FileNotFoundError, OSError) as exc:
             return 127, "", str(exc), False
+        if on_process_start is not None and process.pid:
+            # Recorded before the child can start a nested MCP server, so the
+            # ancestor lookup always sees the pid.
+            on_process_start(int(process.pid))
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout=max(1, timeout))
             return (

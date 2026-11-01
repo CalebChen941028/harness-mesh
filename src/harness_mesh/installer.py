@@ -12,6 +12,8 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
@@ -51,6 +53,22 @@ class InstallResult:
             "detail": self.detail,
             "commands": self.commands,
             "files": self.files,
+        }
+
+
+@dataclass
+class DoctorResult:
+    harness: str
+    status: str
+    detail: str = ""
+    command: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "harness": self.harness,
+            "status": self.status,
+            "detail": self.detail,
+            "command": self.command,
         }
 
 
@@ -118,6 +136,63 @@ class HarnessInstaller:
             results.append(result)
         return results
 
+    def doctor(self, harnesses: Iterable[str] | None = None) -> list[DoctorResult]:
+        requested = list(harnesses or [])
+        if not requested:
+            requested = [name for name, cfg in self.config.harnesses.items() if cfg.enabled]
+        results: list[DoctorResult] = []
+        for harness in requested:
+            registration = self._read_registration(harness)
+            if registration is None:
+                results.append(
+                    DoctorResult(
+                        harness,
+                        "not_installed",
+                        "no MCP/plugin registration found; run `hmesh install --yes`",
+                    )
+                )
+                continue
+            command = str(registration.get("command") or "")
+            args = [str(item) for item in registration.get("args") or []]
+            if not command:
+                results.append(DoctorResult(harness, "failed", "registered command is empty"))
+                continue
+            resolved = shutil.which(command) if not os.path.isabs(command) else command
+            if not resolved or not Path(resolved).exists() or not os.access(resolved, os.X_OK):
+                results.append(
+                    DoctorResult(
+                        harness,
+                        "failed",
+                        f"registered command is missing or not executable: {command}; "
+                        "the venv may have been removed. Reinstall with `hmesh install --yes`.",
+                        command,
+                    )
+                )
+                continue
+            argv = [str(resolved), *args, "--help"]
+            code, stdout, stderr = self._run_doctor(argv)
+            if code == 0:
+                results.append(DoctorResult(harness, "ok", "registered command starts", command))
+            else:
+                results.append(
+                    DoctorResult(
+                        harness,
+                        "failed",
+                        (stderr or stdout).strip()[:500] or f"command exited {code}; "
+                        "reinstall with `hmesh install --yes`",
+                        command,
+                    )
+                )
+        return results
+
+    def _run_doctor(self, argv: list[str]) -> tuple[int, str, str]:
+        if self.dry_run:
+            return 0, "[dry-run]", ""
+        try:
+            return self.runner(argv, self.workspace_root, self._command_env())
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return 127, "", str(exc)
+
     def _install_harness(self, harness: str) -> InstallResult:
         if harness == "zcode":
             return self._install_zcode()
@@ -153,6 +228,7 @@ class HarnessInstaller:
                 cwd=str(cwd),
                 env=env,
                 capture_output=True,
+                stdin=subprocess.DEVNULL,
                 text=True,
                 timeout=180,
             )
@@ -199,11 +275,107 @@ class HarnessInstaller:
         return flags
 
     # ------------------------------------------------------------------
+    # Existing registration discovery / restore
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _normalise_registration(payload: Any) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        command = payload.get("command") or payload.get("cmd")
+        if not command:
+            return None
+        args = payload.get("args") or []
+        env = payload.get("env") or {}
+        return {
+            "command": str(command),
+            "args": [str(item) for item in args] if isinstance(args, list) else [],
+            "env": {str(key): str(value) for key, value in env.items()} if isinstance(env, dict) else {},
+        }
+
+    def _read_registration(self, harness: str) -> dict[str, Any] | None:
+        try:
+            if harness == "claude_code":
+                config_path = self.home_dir / ".claude.json"
+                if not config_path.exists():
+                    return None
+                payload = json.loads(config_path.read_text(encoding="utf-8"))
+                return self._normalise_registration((payload.get("mcpServers") or {}).get(MCP_SERVER_NAME))
+            if harness == "codex":
+                config_path = self.home_dir / ".codex" / "config.toml"
+                if not config_path.exists():
+                    return None
+                payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
+                return self._normalise_registration((payload.get("mcp_servers") or {}).get(MCP_SERVER_NAME))
+            if harness == "antigravity":
+                config_path = self.home_dir / ".gemini" / "config" / "mcp_config.json"
+                if not config_path.exists():
+                    return None
+                payload = json.loads(config_path.read_text(encoding="utf-8"))
+                return self._normalise_registration((payload.get("mcpServers") or {}).get(MCP_SERVER_NAME))
+            if harness == "zcode":
+                manifest = (
+                    self.state_dir
+                    / "zcode-plugin"
+                    / "plugins"
+                    / ZCODE_PLUGIN_NAME
+                    / ".zcode-plugin"
+                    / "plugin.json"
+                )
+                if not manifest.exists():
+                    return None
+                payload = json.loads(manifest.read_text(encoding="utf-8"))
+                return self._normalise_registration((payload.get("mcpServers") or {}).get(MCP_SERVER_NAME))
+            if harness == "deepseek":
+                for path in self._dsh_patch_files():
+                    if not path.exists():
+                        continue
+                    text = path.read_text(encoding="utf-8")
+                    match = re.search(
+                        rf"(?ms)^{re.escape(DSH_BLOCK_START)}\n(.*?)^{re.escape(DSH_BLOCK_END)}",
+                        text,
+                    )
+                    if not match:
+                        continue
+                    parsed = yaml.safe_load(match.group(1))
+                    if not isinstance(parsed, list):
+                        continue
+                    for item in parsed:
+                        if isinstance(item, dict):
+                            for row in item.get("insert", []) or []:
+                                if isinstance(row, dict) and row.get("id") == DSH_ENTRY_ID:
+                                    return self._normalise_registration(row.get("config"))
+        except (OSError, ValueError, json.JSONDecodeError, tomllib.TOMLDecodeError, yaml.YAMLError):
+            return None
+        return None
+
+    def _add_command_for(
+        self, harness: str, binary: str, registration: Mapping[str, Any]
+    ) -> list[str]:
+        command = str(registration.get("command"))
+        args = [str(item) for item in registration.get("args") or []]
+        env = {str(key): str(value) for key, value in (registration.get("env") or {}).items()}
+        if harness == "claude_code":
+            payload = json.dumps(
+                {"type": "stdio", "command": command, "args": args, "env": env}, ensure_ascii=False
+            )
+            return [binary, "mcp", "add-json", "-s", "user", MCP_SERVER_NAME, payload]
+        env_flags: list[str] = []
+        for key, value in env.items():
+            env_flags.extend(["--env", f"{key}={value}"])
+        if harness == "antigravity":
+            return [binary, "mcp", "add", *env_flags, MCP_SERVER_NAME, command, *args]
+        return [binary, "mcp", "add", *env_flags, MCP_SERVER_NAME, "--", command, *args]
+
+    # ------------------------------------------------------------------
     # Claude / Codex / Antigravity
     # ------------------------------------------------------------------
     def _install_mcp_cli(self, harness: str, binary: str) -> InstallResult:
         commands: list[list[str]] = []
-        remove = [binary, "mcp", "remove", MCP_SERVER_NAME]
+        original = self._read_registration(harness)
+        remove = [binary, "mcp", "remove"]
+        if harness == "claude_code":
+            remove.extend(["-s", "user"])
+        remove.append(MCP_SERVER_NAME)
         self._run(remove, commands)
         if harness == "claude_code":
             # Claude's ``--env`` option is variadic and swallows the server
@@ -246,16 +418,25 @@ class HarnessInstaller:
                 "MCP server registered",
                 commands=commands,
             )
-        return InstallResult(
-            harness,
-            "failed",
-            (stderr or stdout).strip()[:1000] or f"exit {code}",
-            commands=commands,
-        )
+        detail = (stderr or stdout).strip()[:1000] or f"exit {code}"
+        if original is not None:
+            restore = self._add_command_for(harness, binary, original)
+            restore_code, restore_stdout, restore_stderr = self._run(restore, commands)
+            if restore_code == 0:
+                detail += "; original registration restored"
+            else:
+                detail += "; restore failed: " + (
+                    (restore_stderr or restore_stdout).strip()[:500] or f"exit {restore_code}"
+                )
+        return InstallResult(harness, "failed", detail, commands=commands)
 
     def _uninstall_mcp_cli(self, harness: str, binary: str) -> InstallResult:
         commands: list[list[str]] = []
-        code, stdout, stderr = self._run([binary, "mcp", "remove", MCP_SERVER_NAME], commands)
+        remove = [binary, "mcp", "remove"]
+        if harness == "claude_code":
+            remove.extend(["-s", "user"])
+        remove.append(MCP_SERVER_NAME)
+        code, stdout, stderr = self._run(remove, commands)
         if code == 0 or "not found" in (stderr + stdout).lower():
             return InstallResult(harness, "uninstalled", "MCP server removed", commands=commands)
         return InstallResult(
@@ -417,16 +598,39 @@ class HarnessInstaller:
             return InstallResult("deepseek", "skipped", "binary not found")
         files: list[Path] = []
         entry = self._dsh_entry()
+        failure = ""
         for path in self._dsh_patch_files():
             if self.dry_run:
                 files.append(path)
                 continue
             path.parent.mkdir(parents=True, exist_ok=True)
             backup = path.with_suffix(path.suffix + ".harness-mesh.bak")
-            if path.exists() and not backup.exists():
-                backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
-            _upsert_dsh_block(path, entry)
+            existed = path.exists()
+            original = path.read_text(encoding="utf-8") if existed else ""
+            if existed and not backup.exists():
+                backup.write_text(original, encoding="utf-8")
+            try:
+                content = _dsh_patch_content(path, entry)
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                failure = f"failed to prepare {path}: {exc}"
+                break
+            try:
+                _validate_dsh_patch(content)
+            except (ValueError, yaml.YAMLError) as exc:
+                failure = f"failed to validate {path}: {exc}"
+                break
+            try:
+                _atomic_write_text(path, content)
+            except OSError as exc:
+                if existed:
+                    _atomic_write_text(path, original)
+                elif path.exists():
+                    path.unlink()
+                failure = f"failed to update {path}: {exc}"
+                break
             files.append(path)
+        if failure:
+            return InstallResult("deepseek", "failed", failure, files=[str(path) for path in files])
         if not files:
             return InstallResult("deepseek", "skipped", "no DSH profile directory found")
         return InstallResult(
@@ -450,6 +654,46 @@ class HarnessInstaller:
 # ----------------------------------------------------------------------
 # DSH patch editing without destroying unrelated entries/comments
 # ----------------------------------------------------------------------
+class _DshLoader(yaml.SafeLoader):
+    """Safe loader that tolerates DSH's ``!!js`` expression scalars."""
+
+
+def _construct_js_scalar(loader: yaml.SafeLoader, node: yaml.Node) -> str:
+    return loader.construct_scalar(node)
+
+
+_DshLoader.add_constructor("tag:yaml.org,2002:js", _construct_js_scalar)
+
+
+def _validate_dsh_patch(content: str) -> None:
+    yaml.load(content, Loader=_DshLoader)  # noqa: S506 - safe loader with one scalar tag
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=str(path.parent), prefix=f".{path.name}.", delete=False
+    )
+    try:
+        with handle:
+            handle.write(content)
+        os.replace(handle.name, path)
+    except OSError:
+        try:
+            os.unlink(handle.name)
+        except OSError:
+            pass
+        raise
+
+
+def _dsh_patch_content(path: Path, entry: Mapping[str, Any]) -> str:
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    text = _remove_dsh_block_text(text).rstrip()
+    text = re.sub(r"(?m)^[ \t]*\[\][ \t]*$", "", text).rstrip()
+    block = _dsh_block(entry)
+    return (text + "\n\n" if text else "") + block
+
+
 def _dsh_block(entry: Mapping[str, Any]) -> str:
     return (
         DSH_BLOCK_START
@@ -482,12 +726,7 @@ def _remove_dsh_block_text(text: str) -> str:
 
 
 def _upsert_dsh_block(path: Path, entry: Mapping[str, Any]) -> None:
-    text = path.read_text(encoding="utf-8") if path.exists() else ""
-    text = _remove_dsh_block_text(text).rstrip()
-    # Drop the empty flow list before appending a block sequence.
-    text = re.sub(r"(?m)^[ \t]*\[\][ \t]*$", "", text).rstrip()
-    block = _dsh_block(entry)
-    path.write_text((text + "\n\n" if text else "") + block, encoding="utf-8")
+    _atomic_write_text(path, _dsh_patch_content(path, entry))
 
 
 def _remove_dsh_block(path: Path) -> None:

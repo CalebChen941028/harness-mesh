@@ -21,7 +21,7 @@ class ZCodeAdapter(BaseHarnessAdapter):
         if "--mode" not in args:
             if call.read_only:
                 extra.extend(["--mode", "plan"])
-            elif self.harness_config.auto_approve:
+            elif self._auto_approval_allowed(call):
                 extra.extend(self._auto_approve_args(["--mode", "yolo"]))
         if call.session_id and "--resume" not in args:
             extra.extend(["--resume", call.session_id])

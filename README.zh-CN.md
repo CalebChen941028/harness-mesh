@@ -77,10 +77,15 @@ hmesh install
 
 ```bash
 hmesh install --dry-run                 # 只显示计划执行的命令/文件，不修改任何配置
+hmesh install --yes                     # 非交互确认后安装
 hmesh install --harness zcode           # 只安装一个 Harness（可重复）
 hmesh install --workspace /path/project # 显式绑定 MCP 工作区
 hmesh install --uninstall               # 卸载集成
 ```
+
+非 `--dry-run` 时会先打印计划修改的文件和命令并请求确认；非交互环境必须显式传 `--yes`。
+
+ZCode 的 `--scope project` 仍会写入全局状态文件 `~/.zcode/cli/plugins/known_marketplaces.json` 与 `installed_plugins.json`，插件本身和缓存则按项目隔离。`hmesh install --uninstall` 会清除这两处记录；手工清理时对应命令为 `zcode plugins uninstall` 与 `zcode plugins marketplace remove`。
 
 安装后重启对应桌面应用，并新建会话/任务；旧会话可能缓存旧工具列表。安装器是幂等的：重复执行会替换已有注册，不会产生重复 DSH 条目。
 
@@ -115,6 +120,8 @@ hmesh dispatch --harness deepseek \
 hmesh tasks
 hmesh read <task_id> diff --limit 4000
 hmesh apply <task_id> --strategy patch
+hmesh apply <task_id> --strategy copy --force-copy
+hmesh doctor
 ```
 
 MCP 服务端默认启动额度探活与 effects 消费；只想要请求/响应时可关闭：
@@ -188,7 +195,8 @@ Ticket task_x（一份 Git Worktree）
 ## CLI
 
 ```text
-hmesh install [--dry-run] [--harness H]... [--uninstall]
+hmesh install [--dry-run] [--yes] [--harness H]... [--uninstall]
+hmesh doctor [--harness H] [--json]
 hmesh status [--refresh] [--json]
 hmesh models [--refresh] [--harness H]
 hmesh quota [--probe]
@@ -196,7 +204,7 @@ hmesh skills [--query Q]
 hmesh dispatch --harness H --objective O [--difficulty D] [--fallback H]...
 hmesh tasks [--status S]
 hmesh read <task_id> [diff|transcript|assignments] [--offset N] [--limit N]
-hmesh apply <task_id> [--strategy patch|merge|copy]
+hmesh apply <task_id> [--strategy patch|merge|copy] [--force-copy]
 hmesh context list [--category C] [--json]
 hmesh context set <key> <content> [--category C] [--author A] [--task-id T]
 hmesh init-mcp [--print] [--target PATH]
@@ -221,10 +229,21 @@ hmesh init-mcp [--print] [--target PATH]
 ## 运维与边界
 
 - `.harness-mesh/` 可能包含源码片段和提示词，不要提交或随意共享。
-- 审批放行参数只服务于一次性 Worktree，不等同于安全沙箱；请使用隔离模式、审查 Diff，并遵守厂商条款。
+- 审批放行参数只服务于一次性 Worktree，不等同于安全沙箱。五个内置 Harness 默认 `auto_approve: true`；`shared_write` 模式默认不注入放行参数，只有 `auto_approve_shared_write: true` 才注入。请审查 Diff，并遵守厂商条款。
+- DeepSeek 内置运行时会从 shell 工具环境中剔除凭据形态的变量，降低误暴露风险；这不构成文件系统或网络沙箱。
 - 一次性 `hmesh dispatch --policy wait_and_resume` 只负责挂起；后台探活和 effects 消费运行在常驻的 `hmesh-mcp` 中，也可手动 `hmesh quota --probe`。
 - Antigravity SDK 超时只能取消等待，无法强杀第三方线程。
 - Codex 各版本接受的审批参数不同。代码内默认注入 `--full-auto`；示例 YAML 针对 codex-cli 0.166 改用 `--dangerously-bypass-approvals-and-sandbox`。可按需调整 `execute_template` 或 `extra.auto_approve_args`。
+
+## 工作区与上下文边界
+
+- MCP 服务与 CLI 要求 Git 工作区；在 `$HOME`、`/` 或非 Git 目录启动会失败。
+- 请求级 `workspace_root` 必须先解析 symlink，再确认位于 `allowed_workspace_roots` 内；默认只允许服务启动工作区。
+- `.env`、PEM/密钥、`credentials*`、`.npmrc`、`.netrc` 等敏感文件不会进入 baseline、脏工作区同步或复制路径。
+- 未追踪 symlink 只在解析后的目标仍位于源工作区内时重建；外部链接与悬空链接跳过。
+- `shared_write` 默认不注入审批放行参数，只有 `auto_approve_shared_write: true` 才注入；DSH 内置 shell 会剔除凭据形态的环境变量。
+- 共享记忆键上限 128 字符、条目上限 4000 字符、渲染总预算 6000 字符；自动记录摘要进入独立的未验证区块。
+- Mesh 发起的 Git 命令禁用 hooks；任务开始后 `.git/config` 或 `.git/hooks` 变化时拒绝 apply。
 
 ## 商标与独立性
 
