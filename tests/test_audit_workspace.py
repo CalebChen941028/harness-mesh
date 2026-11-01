@@ -25,10 +25,12 @@ def _git_files(root: Path) -> list[str]:
 
 
 def test_sensitive_pattern_table_matches_expected_names():
-    for name in (".env", ".env.production", "server.pem", "server.key", "id_rsa", "id_ed25519.pub",
+    for name in (".env", ".env.production", "server.pem", "server.key", "id_rsa", "id_ed25519",
                  "client.p12", "credentials.json", ".npmrc", ".netrc", "app.keystore"):
         assert is_sensitive_name(name), name
     assert not is_sensitive_name("README.md")
+    assert not is_sensitive_name("id_ed25519.pub")
+    assert not is_sensitive_name("credentials_service.py")
     assert ".env" in SENSITIVE_FILE_PATTERNS
 
 
@@ -47,8 +49,9 @@ def test_baseline_commit_excludes_sensitive_files(tmp_path):
     assert "a.txt" in tracked
     assert not any(is_sensitive_name(path) for path in tracked)
     exclude = (root / ".git" / "info" / "exclude").read_text(encoding="utf-8")
-    assert ".env" in exclude
-    assert "*.pem" in exclude
+    assert ".env" not in exclude
+    assert "*.pem" not in exclude
+    assert ".harness-mesh" in exclude
 
 
 def test_non_git_workspace_is_refused_by_default(tmp_path):

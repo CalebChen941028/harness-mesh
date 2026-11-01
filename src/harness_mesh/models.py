@@ -249,6 +249,7 @@ class TaskResult(_Model):
     modified_files: list[str] = Field(default_factory=list)
     git_diff: str = ""
     git_diff_truncated: bool = False
+    warnings: list[str] = Field(default_factory=list)
     read_pointers: dict[str, str] = Field(default_factory=dict)
     worktree_path: str | None = None
     worktree_branch: str | None = None

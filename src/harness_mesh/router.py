@@ -930,6 +930,7 @@ class MeshRouter:
             modified_files=changes.modified_files,
             git_diff=diff_preview,
             git_diff_truncated=diff_truncated,
+            warnings=[f"skipped sensitive file: {path}" for path in changes.skipped_sensitive],
             transcript_text=transcript_text,
         )
         self.storage.save_resource(request.task_id, "diff", changes.diff or "")
@@ -1210,6 +1211,7 @@ class MeshRouter:
         modified_files: list[str] | None = None,
         git_diff: str = "",
         git_diff_truncated: bool = False,
+        warnings: list[str] | None = None,
         transcript_text: str = "",
         checkpoint: ContinuationCheckpoint | None = None,
         mode: WorkspaceMode = WorkspaceMode.ISOLATED_WORKTREE,
@@ -1239,6 +1241,7 @@ class MeshRouter:
             modified_files=list(modified_files or []),
             git_diff=git_diff,
             git_diff_truncated=git_diff_truncated,
+            warnings=list(warnings or []),
             read_pointers={
                 "diff": f"ticket/{task_id}/diff",
                 "transcript": f"ticket/{task_id}/transcript",

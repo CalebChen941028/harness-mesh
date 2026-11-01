@@ -16,7 +16,7 @@ from typing import Any, Iterable, Mapping
 
 from .config import cap_text
 from .models import ContinuationCheckpoint, TaskRequest, utc_now
-from .security import SENSITIVE_FILE_PATTERNS, is_sensitive_name, is_sensitive_path
+from .security import is_sensitive_path, sensitive_git_pathspecs
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,7 @@ class Changes:
     modified_files: list[str] = field(default_factory=list)
     diff: str = ""
     base_ref: str = "HEAD"
+    skipped_sensitive: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -50,6 +51,7 @@ class ApplyResult:
     used_fallback: bool = False
     detail: str = ""
     branch: str | None = None
+    warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -59,6 +61,7 @@ class ApplyResult:
             "used_fallback": self.used_fallback,
             "detail": self.detail,
             "branch": self.branch,
+            "warnings": self.warnings,
         }
 
 
@@ -240,7 +243,7 @@ class WorkspaceManager:
         self._ensure_git_excludes()
         head = self._git(["rev-parse", "--verify", "HEAD"])
         if head.returncode != 0:
-            self._git(["add", "-A", "--", "."], check=True)
+            self._git(["add", "-A", "--", ".", *sensitive_git_pathspecs()], check=True)
             self._git(
                 [
                     "-c",
@@ -272,7 +275,6 @@ class WorkspaceManager:
             self.state_dir, self.workspace_root
         ) else None
         entries.append(f"/{relative_state.as_posix()}/" if relative_state else str(self.state_dir))
-        entries.extend(SENSITIVE_FILE_PATTERNS)
         existing_lines = set(existing.splitlines())
         additions = [entry for entry in entries if entry not in existing_lines]
         if additions:
@@ -463,7 +465,7 @@ class WorkspaceManager:
         status = self._git(["status", "--porcelain", "-z"], cwd=self.workspace_root)
         if status.returncode == 0:
             for relative in self._parse_porcelain_paths(status.stdout):
-                if self._is_state_path(relative) or is_sensitive_name(relative):
+                if self._is_state_path(relative) or is_sensitive_path(relative):
                     continue
                 src = self.workspace_root / relative
                 dst = worktree_path / relative
@@ -480,7 +482,7 @@ class WorkspaceManager:
         if status.returncode != 0:
             return
         for relative in self._parse_porcelain_paths(status.stdout):
-            if self._is_state_path(relative) or is_sensitive_name(relative):
+            if self._is_state_path(relative) or is_sensitive_path(relative):
                 continue
             src = self.workspace_root / relative
             dst = worktree_path / relative
@@ -517,7 +519,7 @@ class WorkspaceManager:
         return relative == state_rel.as_posix() or relative.startswith(state_rel.as_posix() + "/")
 
     def _commit_worktree_baseline(self, task_id: str, worktree_path: Path, message: str) -> str | None:
-        self._git(["add", "-A", "--", "."], cwd=worktree_path)
+        self._git(["add", "-A", "--", ".", *sensitive_git_pathspecs()], cwd=worktree_path)
         result = self._git(
             [
                 "-c",
@@ -636,9 +638,10 @@ class WorkspaceManager:
         # ``git add -N`` records intent-to-add so that brand-new files appear in
         # the diff with their full content.  It does not stage content,
         # therefore it is safe inside an isolated worktree.
+        excludes = sensitive_git_pathspecs()
         if stage_untracked:
-            self._git(["add", "-N", "--", "."], cwd=target)
-        result = self._git(["diff", ref, "--no-color", "--", "."], cwd=target)
+            self._git(["add", "-N", "--", ".", *excludes], cwd=target)
+        result = self._git(["diff", ref, "--no-color", "--", ".", *excludes], cwd=target)
         if result.returncode != 0:
             # A repository without commits: show the staged/worktree diff instead.
             result = self._git(["diff", "--no-color"], cwd=target)
@@ -649,7 +652,9 @@ class WorkspaceManager:
         if not self.is_git_repo(target):
             return []
         ref = base_ref or self.baseline_for_path(target) or "HEAD"
-        result = self._git(["diff", "--name-only", ref, "--", "."], cwd=target)
+        result = self._git(
+            ["diff", "--name-only", ref, "--", ".", *sensitive_git_pathspecs()], cwd=target
+        )
         if result.returncode != 0:
             return []
         return [line.strip() for line in result.stdout.splitlines() if line.strip()]
@@ -664,13 +669,26 @@ class WorkspaceManager:
         target = Path(path)
         ref = base_ref or self.baseline_for_path(target)
         diff = self.collect_diff(target, stage_untracked=stage_untracked, base_ref=ref)
-        files = set(self.modified_files(target))
-        files.update(self.diff_files(target, base_ref=ref))
+        raw_files = set(self.modified_files(target))
+        raw_files.update(self.diff_files(target, base_ref=ref))
+        skipped: list[str] = []
+        for path in sorted(raw_files):
+            if not is_sensitive_path(path):
+                continue
+            candidate = target / path
+            if candidate.is_dir() and not candidate.is_symlink():
+                for child in sorted(candidate.rglob("*")):
+                    if child.is_file() or child.is_symlink():
+                        skipped.append(child.relative_to(target).as_posix())
+            else:
+                skipped.append(path)
+        visible = sorted(path for path in raw_files if not is_sensitive_path(path))
         return Changes(
             worktree_path=str(target),
-            modified_files=sorted(files),
+            modified_files=visible,
             diff=diff,
             base_ref=ref or "HEAD",
+            skipped_sensitive=skipped,
         )
 
     def capture_checkpoint(
@@ -723,7 +741,13 @@ class WorkspaceManager:
         changes = self.collect_changes(source)
         if strategy == "copy":
             applied = self._copy_changes(source, target, changes.modified_files)
-            return ApplyResult(task_id=task_id, strategy=strategy, applied_files=applied, detail="copied files")
+            return ApplyResult(
+                task_id=task_id,
+                strategy=strategy,
+                applied_files=applied,
+                detail="copied files",
+                warnings=list(changes.skipped_sensitive),
+            )
         if strategy not in {"patch", "merge"}:
             raise ValueError(f"unsupported apply strategy: {strategy}")
         if not changes.diff.strip():
@@ -747,6 +771,7 @@ class WorkspaceManager:
                 strategy=strategy,
                 applied_files=list(changes.modified_files),
                 detail="patch applied",
+                warnings=list(changes.skipped_sensitive),
             )
         conflict_detail = result.stderr.strip() or result.stdout.strip()
         if strategy == "merge":
@@ -789,7 +814,7 @@ class WorkspaceManager:
             rel_path = Path(relative)
             if rel_path.is_absolute() or ".." in rel_path.parts:
                 raise WorkspaceError(f"refusing unsafe worktree path: {relative}")
-            if is_sensitive_name(rel_path.name):
+            if is_sensitive_path(rel_path):
                 continue
             src_path = source / rel_path
             dst_path = target / rel_path

@@ -12,33 +12,76 @@ SENSITIVE_FILE_PATTERNS: tuple[str, ...] = (
     ".env.*",
     "*.pem",
     "*.key",
+    "*.p12",
+    "*.pfx",
+    "*.p8",
+    "*.jks",
+    "*.keystore",
     "id_rsa*",
     "id_ed25519*",
-    "*.p12",
-    "credentials*",
+    "id_ecdsa*",
+    "id_dsa*",
+    "credentials",
+    "credentials.json",
+    "credentials.yml",
+    "credentials.yaml",
+    ".credentials*",
     ".npmrc",
     ".netrc",
-    "*.keystore",
+    ".pypirc",
+    ".git-credentials",
+    ".dockercfg",
+    ".htpasswd",
+    "*.tfvars",
+    "terraform.tfstate*",
+    "kubeconfig",
+    "secrets.json",
+    "secrets.yml",
+    "secrets.yaml",
+    "secrets.toml",
 )
-
-
-class WorkspaceRootError(ValueError):
-    """Raised when a workspace root is outside the configured allowlist."""
+SENSITIVE_DIR_SEGMENTS: tuple[str, ...] = (".ssh", ".aws", ".gnupg", ".git")
+ALLOWED_ENV_EXAMPLES: frozenset[str] = frozenset(
+    {".env.example", ".env.sample", ".env.template", ".env.dist"}
+)
+_PRIVATE_KEY_PREFIXES = ("id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")
 
 
 def _pattern_applies(pattern: str, name: str) -> bool:
-    if pattern.startswith(".") or pattern.endswith("*"):
-        return fnmatch.fnmatch(name.lower(), pattern.lower())
-    return fnmatch.fnmatch(name, pattern)
+    return fnmatch.fnmatch(name.lower(), pattern.lower())
 
 
 def is_sensitive_name(name: str) -> bool:
     basename = Path(name).name
+    lowered = basename.lower()
+    if lowered in ALLOWED_ENV_EXAMPLES:
+        return False
+    if lowered.endswith(".pub") and lowered.startswith(_PRIVATE_KEY_PREFIXES):
+        return False
     return any(_pattern_applies(pattern, basename) for pattern in SENSITIVE_FILE_PATTERNS)
 
 
 def is_sensitive_path(path: str | Path) -> bool:
+    parts = Path(path).parts
+    if any(part.lower() in SENSITIVE_DIR_SEGMENTS for part in parts):
+        return True
     return is_sensitive_name(Path(path).name)
+
+
+def sensitive_git_pathspecs() -> list[str]:
+    """Git pathspec ``:(exclude,glob)`` arguments for sensitive material."""
+
+    specs: list[str] = []
+    for pattern in SENSITIVE_FILE_PATTERNS:
+        specs.append(f":(exclude,glob){pattern}")
+    for segment in SENSITIVE_DIR_SEGMENTS:
+        specs.append(f":(exclude,glob)**/{segment}/**")
+        specs.append(f":(exclude,glob){segment}/**")
+    return specs
+
+
+class WorkspaceRootError(ValueError):
+    """Raised when a workspace root is outside the configured allowlist."""
 
 
 def resolve_allowed_root(requested: str | Path, allowed_roots: Iterable[str | Path]) -> Path:
