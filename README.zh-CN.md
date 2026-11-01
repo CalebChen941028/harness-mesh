@@ -85,6 +85,8 @@ hmesh install --uninstall               # 卸载集成
 
 非 `--dry-run` 时会先打印计划修改的文件和命令并请求确认；非交互环境必须显式传 `--yes`。
 
+ZCode 的 `--scope project` 仍会写入全局状态文件 `~/.zcode/cli/plugins/known_marketplaces.json` 与 `installed_plugins.json`，插件本身和缓存则按项目隔离。`hmesh install --uninstall` 会清除这两处记录；手工清理时对应命令为 `zcode plugins uninstall` 与 `zcode plugins marketplace remove`。
+
 安装后重启对应桌面应用，并新建会话/任务；旧会话可能缓存旧工具列表。安装器是幂等的：重复执行会替换已有注册，不会产生重复 DSH 条目。
 
 ## 快速开始
