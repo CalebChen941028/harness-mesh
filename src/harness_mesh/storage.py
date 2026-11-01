@@ -447,6 +447,8 @@ class StateStore:
         task_id: str | None = None,
     ) -> dict[str, Any]:
         now = time.time()
+        key = str(key).strip()[:128] or "untitled"
+        content = str(content)[:4000]
         with self._lock:
             self._conn.execute(
                 """

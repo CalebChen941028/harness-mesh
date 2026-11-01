@@ -116,7 +116,9 @@ class MeshRouter:
             home_dir=home_dir,
             env=self.env,
         )
-        self.context = context or ProjectContextManager(storage, self.workspace_root)
+        self.context = context or ProjectContextManager(
+            storage, self.workspace_root, valid_harnesses=self.config.harnesses.keys()
+        )
         self.adapters = dict(adapters) if adapters is not None else build_adapters(
             config,
             self.workspace_root,
@@ -2119,7 +2121,7 @@ def create_mesh_runtime(
         env=env,
     )
     skills = SkillPluginManager(cfg, root, home_dir=home_dir, env=env)
-    context = ProjectContextManager(storage, root)
+    context = ProjectContextManager(storage, root, valid_harnesses=cfg.harnesses.keys())
     workspace = WorkspaceManager(root, cfg.state_dir, auto_init_repo=cfg.auto_init_repo)
     adapters = build_adapters(cfg, root, env=env)
     guardian = QuotaGuardian(
