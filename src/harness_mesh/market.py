@@ -967,6 +967,10 @@ class MarketService:
         self.config = config or MarketConfig()
         self.env = dict(env) if env is not None else dict(os.environ)
         self.now_fn = now_fn or time.time
+        if scorer is None:
+            from .discovery import score_model_id
+
+            scorer = score_model_id
         self.scorer = scorer
         self.transport = transport
         self._aa_day = self._day_key(self.now_fn())
@@ -1206,8 +1210,7 @@ class MarketService:
                     warnings.append(f"{source}: skipped one malformed cached model")
         merged = merge_market_models(collected)
         merged = apply_overrides(merged, self.config.overrides)
-        if self.scorer is not None:
-            merged = apply_heuristic_intelligence(merged, self.scorer, now=now)
+        merged = apply_heuristic_intelligence(merged, self.scorer, now=now)
         merged.sort(key=lambda model: model.key)
         return MarketCatalog(
             models=merged,

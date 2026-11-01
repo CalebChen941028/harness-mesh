@@ -148,6 +148,55 @@ _CONTEXT_RE = re.compile(
 )
 
 
+def score_model_id(model_id: str, role_hint: str | None = None) -> float:
+    """Score a model id from semantic family/role features.
+
+    This is the pre-market heuristic used by discovery and by
+    :mod:`harness_mesh.market` when no evaluation source is configured.  It
+    never consults a market catalogue and embeds no concrete model name.
+    """
+
+    text = model_id.lower()
+    score = 20.0
+    if "<cli_active_default>" in text:
+        return 20.0
+    if role_hint == "opus":
+        score += 16.0
+    elif role_hint == "sonnet":
+        score += 8.0
+    elif role_hint in {"haiku", "small"}:
+        score -= 8.0
+    elif role_hint == "reasoning":
+        score += 6.0
+    elif role_hint == "fable":
+        score += 12.0
+    applied: set[str] = set()
+    for feature, delta in _HIGH_FEATURES:
+        if feature in text and feature not in applied:
+            score += delta
+            applied.add(feature)
+    for feature, delta in _LOW_FEATURES:
+        if feature in text and feature not in applied:
+            score += delta
+            applied.add(feature)
+    # Prefer newer generations within a known family.  Claude-style ids
+    # encode the version as ``opus-5-5`` (5.5), where a naive max-number scan
+    # would wrongly rank ``opus-4-8`` above it.
+    family_version = re.search(r"(?:opus|sonnet|haiku|fable)[-_](\d+)(?:[.-](\d+))?", text)
+    if family_version:
+        major = int(family_version.group(1))
+        minor = int(family_version.group(2) or 0)
+        score += min(major + minor / 10.0, 6.0) * 0.6
+    else:
+        versions = [
+            float(item)
+            for item in re.findall(r"(?<![A-Za-z])(\d+(?:\.\d+)?)(?![A-Za-z0-9])", text)
+        ]
+        if versions:
+            score += min(max(versions), 6.0) * 0.6
+    return round(max(1.0, min(100.0, score)), 2)
+
+
 class ModelDiscoveryEngine:
     def __init__(
         self,
@@ -971,47 +1020,7 @@ class ModelDiscoveryEngine:
     # scoring and tiering
     # ------------------------------------------------------------------
     def score_model(self, model_id: str, role_hint: str | None = None) -> float:
-        text = model_id.lower()
-        score = 20.0
-        if "<cli_active_default>" in text:
-            return 20.0
-        if role_hint == "opus":
-            score += 16.0
-        elif role_hint == "sonnet":
-            score += 8.0
-        elif role_hint in {"haiku", "small"}:
-            score -= 8.0
-        elif role_hint == "reasoning":
-            score += 6.0
-        elif role_hint == "fable":
-            score += 12.0
-        applied: set[str] = set()
-        for feature, delta in _HIGH_FEATURES:
-            if feature in text and feature not in applied:
-                score += delta
-                applied.add(feature)
-        for feature, delta in _LOW_FEATURES:
-            if feature in text and feature not in applied:
-                score += delta
-                applied.add(feature)
-        # Prefer newer generations within a known family.  Claude-style ids
-        # encode the version as ``opus-5-5`` (5.5), where a naive max-number
-        # scan would wrongly rank ``opus-4-8`` above it.
-        family_version = re.search(
-            r"(?:opus|sonnet|haiku|fable)[-_](\d+)(?:[.-](\d+))?", text
-        )
-        if family_version:
-            major = int(family_version.group(1))
-            minor = int(family_version.group(2) or 0)
-            score += min(major + minor / 10.0, 6.0) * 0.6
-        else:
-            versions = [
-                float(item)
-                for item in re.findall(r"(?<![A-Za-z])(\d+(?:\.\d+)?)(?![A-Za-z0-9])", text)
-            ]
-            if versions:
-                score += min(max(versions), 6.0) * 0.6
-        return round(max(1.0, min(100.0, score)), 2)
+        return score_model_id(model_id, role_hint)
 
     @staticmethod
     def supports_reasoning(model_id: str, role_hint: str | None = None) -> bool:
@@ -1248,4 +1257,5 @@ __all__ = [
     "ModelDiscoveryEngine",
     "PLACEHOLDER_MODEL",
     "TIER_NAMES",
+    "score_model_id",
 ]
