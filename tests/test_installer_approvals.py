@@ -488,10 +488,10 @@ def test_zcode_and_deepseek_report_no_approval_settings_needed(tmp_path):
     zcode = installer.install(["zcode"])[0]
     deepseek = installer.install(["deepseek"])[0]
     assert zcode.action == "installed"
-    assert "无需批准设置" in zcode.detail
+    assert "no approval settings needed" in zcode.detail
     assert zcode.approvals["status"] == "not_required"
     assert deepseek.action == "installed"
-    assert "无需批准设置" in deepseek.detail
+    assert "no approval settings needed" in deepseek.detail
     assert deepseek.approvals["status"] == "not_required"
 
 

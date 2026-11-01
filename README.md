@@ -270,6 +270,7 @@ Key settings:
 | `allowed_workspace_roots` | service workspace | Optional allowlist for request-level `workspace_root`; symlinks are resolved before containment checks |
 | `auto_init_repo` | `false` | Refuse a non-Git workspace unless it is explicitly enabled |
 | `auto_approve_shared_write` | `false` | Injection of approval-bypass flags when `workspace_mode=shared_write` |
+| ZCode `extra.restricted_mode` | `build` | Mode used when approval is withheld (`build`, `edit` or `plan`); `zcode -p` would otherwise default to yolo |
 | `max_active_assignments` | `8` | Global cap on simultaneously running assignments |
 | `summary_max_chars` | `1500` | Summary returned to the controller |
 | `diff_preview_max_chars` | `4000` | Diff preview returned to the controller |

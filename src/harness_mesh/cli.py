@@ -13,7 +13,7 @@ import typer
 
 from .approvals import APPROVAL_LEVELS, DEFAULT_APPROVAL_LEVEL
 from .config import find_config_path, load_config
-from .installer import HarnessInstaller
+from .installer import NO_APPROVAL_DETAIL, HarnessInstaller
 from .lineage import (
     _effective_call_depth,
     _merge_trace_chain,
@@ -96,19 +96,19 @@ def _approval_summary(level: str, results) -> str:
             approved.update(result.approvals.get("tools") or [])
     if level == "none":
         return (
-            "未预先批准任何 MCP 工具；无界面运行会被拒绝，"
-            "可用 `--approve read` 或 `--approve dispatch` 预先批准。"
+            "No MCP tools were pre-approved; headless runs will be denied. "
+            "Use `--approve read` or `--approve dispatch` to pre-approve them."
         )
     if level == "all" and approved:
-        return f"已批准 {len(approved)} 个工具（全部）；无界面运行不再需要逐次批准。"
+        return f"Approved {len(approved)} tools (all); headless runs no longer need per-call approval."
     if approved:
         return (
-            f"已批准 {len(approved)} 个工具；无界面运行 `apply_task_patch` 等仍需手动批准，"
-            "可用 `--approve all`"
+            f"Approved {len(approved)} tools; headless runs still need manual approval for "
+            "`apply_task_patch` and other write tools. Use `--approve all` to change that."
         )
     return (
-        "所选 Harness 无需批准设置；无界面运行 `apply_task_patch` 等仍需手动批准，"
-        "可用 `--approve all`"
+        "The selected harnesses need no approval settings; headless runs still need manual "
+        "approval for `apply_task_patch` and other write tools. Use `--approve all` to change that."
     )
 
 
@@ -247,7 +247,7 @@ def doctor(
             if not approvals:
                 continue
             if approvals.get("status") == "not_required":
-                typer.echo("  approvals: 无需批准设置")
+                typer.echo(f"  approvals: {NO_APPROVAL_DETAIL}")
             elif approvals.get("status") == "failed":
                 typer.echo(f"  approvals: {approvals.get('detail')}")
             else:
