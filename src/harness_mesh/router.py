@@ -204,7 +204,10 @@ class MeshRouter:
     async def _dispatch(self, request: TaskRequest) -> TaskResult:
         started = self.now_fn()
         target = request.target_harness.strip()
-        if self.config.max_active_assignments >= 0 and self._active_assignments >= self.config.max_active_assignments:
+        if (
+            self.config.max_active_assignments >= 0
+            and self._active_assignments >= self.config.max_active_assignments
+        ):
             return self._rejected_result(
                 request,
                 f"max_active_assignments limit reached ({self.config.max_active_assignments})",
@@ -416,6 +419,12 @@ class MeshRouter:
                 continue
 
             attempt_no = existing_attempts + 1
+            # These are the exact values handed to the adapter (and therefore
+            # exported into the worker environment).  Persisting them lets a
+            # nested MCP server rebuild the lineage when the host does not
+            # forward HARNESS_MESH_*.
+            call_depth = request.call_depth + 1
+            call_trace = [*trace_chain, current_harness]
             assignment = AssignmentRecord(
                 task_id=request.task_id,
                 attempt=attempt_no,
@@ -423,8 +432,10 @@ class MeshRouter:
                 model=current_model,
                 status="running",
                 started_at=utc_now(),
+                call_depth=call_depth,
+                trace_chain=list(call_trace),
             )
-            self.storage.add_assignment(assignment)
+            assignment = self.storage.add_assignment(assignment)
             prior_history = self.storage.list_assignments(request.task_id)
             prior_history = [item for item in prior_history if item.assignment_id != assignment.assignment_id]
             include_checkpoint = checkpoint if checkpoint is not None else None
@@ -476,13 +487,16 @@ class MeshRouter:
                 plugins=call_plugins,
                 timeout_seconds=timeout_seconds,
                 env={},
-                trace_chain=[*trace_chain, current_harness],
-                call_depth=request.call_depth + 1,
+                trace_chain=call_trace,
+                call_depth=call_depth,
                 read_only=(mode == WorkspaceMode.READ_ONLY),
                 shared_write=(mode == WorkspaceMode.SHARED_WRITE),
                 session_id=request.session_id,
                 skills=[skill.name for skill in skills_selected],
                 task=request,
+                on_process_start=lambda pid: self.storage.update_assignment(
+                    assignment.assignment_id, pid=int(pid)
+                ),
             )
             call_started = self.now_fn()
             self._active_assignments += 1
