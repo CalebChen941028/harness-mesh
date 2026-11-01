@@ -394,281 +394,209 @@ class MeshRouter:
         success = False
         replans = 0
 
-        while existing_attempts < max_attempts:
-            if replans > max_attempts + 3:
-                last_error = last_error or "candidate replanning did not converge"
-                break
-            if not self._adapter_runnable(current_harness) or not current_model:
-                pair = await self._pick_failover(
-                    request, root, current_harness, current_model or "", exclude_pairs, difficulty
-                )
-                if pair is None:
+        assignment_ids: list[str] = []
+        try:
+            while existing_attempts < max_attempts:
+                if replans > max_attempts + 3:
+                    last_error = last_error or "candidate replanning did not converge"
                     break
-                current_harness, current_model = pair
-                replans += 1
-                continue
-            if not self.guardian.is_available(current_harness, current_model):
-                pair = await self._pick_failover(
-                    request, root, current_harness, current_model, exclude_pairs, difficulty
-                )
-                if pair is None:
-                    break
-                current_harness, current_model = pair
-                replans += 1
-                continue
+                if not self._adapter_runnable(current_harness) or not current_model:
+                    pair = await self._pick_failover(
+                        request, root, current_harness, current_model or "", exclude_pairs, difficulty
+                    )
+                    if pair is None:
+                        break
+                    current_harness, current_model = pair
+                    replans += 1
+                    continue
+                if not self.guardian.is_available(current_harness, current_model):
+                    pair = await self._pick_failover(
+                        request, root, current_harness, current_model, exclude_pairs, difficulty
+                    )
+                    if pair is None:
+                        break
+                    current_harness, current_model = pair
+                    replans += 1
+                    continue
 
-            attempt_no = existing_attempts + 1
-            # These are the exact values handed to the adapter (and therefore
-            # exported into the worker environment).  Persisting them lets a
-            # nested MCP server rebuild the lineage when the host does not
-            # forward HARNESS_MESH_*.
-            call_depth = request.call_depth + 1
-            call_trace = [*trace_chain, current_harness]
-            assignment = AssignmentRecord(
-                task_id=request.task_id,
-                attempt=attempt_no,
-                harness=current_harness,
-                model=current_model,
-                status="running",
-                started_at=utc_now(),
-                call_depth=call_depth,
-                trace_chain=list(call_trace),
-            )
-            assignment = self.storage.add_assignment(assignment)
-            prior_history = self.storage.list_assignments(request.task_id)
-            prior_history = [item for item in prior_history if item.assignment_id != assignment.assignment_id]
-            include_checkpoint = checkpoint if checkpoint is not None else None
-            prompt = build_handoff_prompt(
-                request,
-                include_checkpoint,
-                next_harness=current_harness,
-                next_model=current_model,
-                skills_prompt=skills_prompt,
-                assignment_history=prior_history,
-                reasoning_effort=effort,
-                project_instructions=project_instructions,
-                project_memory=project_memory,
-                context_previews=context_previews,
-                upstream_outputs=upstream_outputs,
-            )
-            adapter = self.adapters.get(current_harness)
-            if adapter is None:
-                self.storage.update_assignment(
-                    assignment.assignment_id, status="ended_error", ended_at=utc_now(), error_reason="adapter_missing"
+                attempt_no = existing_attempts + 1
+                # These are the exact values handed to the adapter (and therefore
+                # exported into the worker environment).  Persisting them lets a
+                # nested MCP server rebuild the lineage when the host does not
+                # forward HARNESS_MESH_*.
+                call_depth = request.call_depth + 1
+                call_trace = [*trace_chain, current_harness]
+                assignment = AssignmentRecord(
+                    task_id=request.task_id,
+                    attempt=attempt_no,
+                    harness=current_harness,
+                    model=current_model,
+                    status="running",
+                    started_at=utc_now(),
+                    call_depth=call_depth,
+                    trace_chain=list(call_trace),
                 )
-                last_error = f"adapter missing for {current_harness}"
-                exclude_pairs.add((current_harness, current_model))
-                existing_attempts += 1
-                continue
-
-            timeout_seconds = int(
-                request.timeout_seconds
-                or self.config.timeout_for(difficulty)
-                or self.config.default_timeout_seconds
-            )
-            adapter_supports_mcp = bool(getattr(adapter, "supports_mcp_config", True))
-            call_mcp_path = mcp_config_path if adapter_supports_mcp else None
-            call_plugins: list[str] = []
-            if adapter_supports_mcp and call_mcp_path is not None:
-                for plugin in plugins_selected:
-                    if plugin.name not in active_plugin_names:
-                        active_plugin_names.append(plugin.name)
-                call_plugins = [plugin.name for plugin in plugins_selected]
-            call = AdapterCall(
-                task_id=request.task_id,
-                assignment_id=assignment.assignment_id,
-                prompt=prompt,
-                workdir=workdir,
-                model=current_model,
-                system_prompt=skills_prompt,
-                reasoning_effort=effort,
-                mcp_config_path=call_mcp_path,
-                plugins=call_plugins,
-                timeout_seconds=timeout_seconds,
-                env={},
-                trace_chain=call_trace,
-                call_depth=call_depth,
-                read_only=(mode == WorkspaceMode.READ_ONLY),
-                shared_write=(mode == WorkspaceMode.SHARED_WRITE),
-                session_id=request.session_id,
-                skills=[skill.name for skill in skills_selected],
-                task=request,
-                on_process_start=lambda pid: self.storage.update_assignment(
-                    assignment.assignment_id, pid=int(pid)
-                ),
-            )
-            call_started = self.now_fn()
-            try:
-                raw_outcome = await asyncio.wait_for(
-                    adapter.execute(call), timeout=max(1.0, float(timeout_seconds)) + 1.0
+                assignment = self.storage.add_assignment(assignment)
+                assignment_ids.append(assignment.assignment_id)
+                prior_history = self.storage.list_assignments(request.task_id)
+                prior_history = [item for item in prior_history if item.assignment_id != assignment.assignment_id]
+                include_checkpoint = checkpoint if checkpoint is not None else None
+                prompt = build_handoff_prompt(
+                    request,
+                    include_checkpoint,
+                    next_harness=current_harness,
+                    next_model=current_model,
+                    skills_prompt=skills_prompt,
+                    assignment_history=prior_history,
+                    reasoning_effort=effort,
+                    project_instructions=project_instructions,
+                    project_memory=project_memory,
+                    context_previews=context_previews,
+                    upstream_outputs=upstream_outputs,
                 )
-            except asyncio.TimeoutError:
-                raw_outcome = AdapterOutcome(
-                    exit_code=124,
-                    timed_out=True,
-                    stderr=f"[harness-mesh] assignment timed out after {timeout_seconds}s",
-                    error_detail="timeout",
-                )
-            except Exception as exc:
-                raw_outcome = AdapterOutcome(
-                    exit_code=1,
-                    stderr=str(exc),
-                    error_detail=f"adapter_exception: {exc}",
-                )
-            outcome = self._normalize_outcome(raw_outcome)
-            if outcome.duration_ms <= 0:
-                outcome.duration_ms = int((self.now_fn() - call_started) * 1000)
-            if worktree_path and mode in {WorkspaceMode.ISOLATED_WORKTREE, WorkspaceMode.READ_ONLY}:
-                try:
-                    ws.verify_git_guard(request.task_id)
-                except WorkspaceError:
+                adapter = self.adapters.get(current_harness)
+                if adapter is None:
                     self.storage.update_assignment(
                         assignment.assignment_id,
                         status="ended_error",
                         ended_at=utc_now(),
-                        error_reason="git_metadata_tampered",
+                        error_reason="adapter_missing",
+                    )
+                    last_error = f"adapter missing for {current_harness}"
+                    exclude_pairs.add((current_harness, current_model))
+                    existing_attempts += 1
+                    continue
+
+                timeout_seconds = int(
+                    request.timeout_seconds
+                    or self.config.timeout_for(difficulty)
+                    or self.config.default_timeout_seconds
+                )
+                adapter_supports_mcp = bool(getattr(adapter, "supports_mcp_config", True))
+                call_mcp_path = mcp_config_path if adapter_supports_mcp else None
+                call_plugins: list[str] = []
+                if adapter_supports_mcp and call_mcp_path is not None:
+                    for plugin in plugins_selected:
+                        if plugin.name not in active_plugin_names:
+                            active_plugin_names.append(plugin.name)
+                    call_plugins = [plugin.name for plugin in plugins_selected]
+                call = AdapterCall(
+                    task_id=request.task_id,
+                    assignment_id=assignment.assignment_id,
+                    prompt=prompt,
+                    workdir=workdir,
+                    model=current_model,
+                    system_prompt=skills_prompt,
+                    reasoning_effort=effort,
+                    mcp_config_path=call_mcp_path,
+                    plugins=call_plugins,
+                    timeout_seconds=timeout_seconds,
+                    env={},
+                    trace_chain=call_trace,
+                    call_depth=call_depth,
+                    read_only=(mode == WorkspaceMode.READ_ONLY),
+                    shared_write=(mode == WorkspaceMode.SHARED_WRITE),
+                    session_id=request.session_id,
+                    skills=[skill.name for skill in skills_selected],
+                    task=request,
+                    on_process_start=lambda pid: self.storage.update_assignment(
+                        assignment.assignment_id, pid=int(pid)
+                    ),
+                )
+                call_started = self.now_fn()
+                try:
+                    raw_outcome = await asyncio.wait_for(
+                        adapter.execute(call), timeout=max(1.0, float(timeout_seconds)) + 1.0
+                    )
+                except asyncio.TimeoutError:
+                    raw_outcome = AdapterOutcome(
+                        exit_code=124,
+                        timed_out=True,
+                        stderr=f"[harness-mesh] assignment timed out after {timeout_seconds}s",
+                        error_detail="timeout",
+                    )
+                except Exception as exc:
+                    raw_outcome = AdapterOutcome(
+                        exit_code=1,
+                        stderr=str(exc),
+                        error_detail=f"adapter_exception: {exc}",
+                    )
+                outcome = self._normalize_outcome(raw_outcome)
+                if outcome.duration_ms <= 0:
+                    outcome.duration_ms = int((self.now_fn() - call_started) * 1000)
+                if worktree_path and mode in {WorkspaceMode.ISOLATED_WORKTREE, WorkspaceMode.READ_ONLY}:
+                    try:
+                        ws.verify_git_guard(request.task_id)
+                    except WorkspaceError:
+                        self.storage.update_assignment(
+                            assignment.assignment_id,
+                            status="ended_error",
+                            ended_at=utc_now(),
+                            error_reason="git_metadata_tampered",
+                            duration_ms=outcome.duration_ms,
+                            exit_code=outcome.exit_code,
+                        )
+                        return self._terminal_result(
+                            request,
+                            status=TaskStatus.FAILED,
+                            initial_harness=target,
+                            current_harness=current_harness,
+                            current_model=current_model,
+                            difficulty=difficulty,
+                            effort=effort,
+                            summary="Git metadata changed during the assignment; worktree retained for inspection.",
+                            error_detail="git_metadata_tampered",
+                            workdir=workdir,
+                            worktree_path=worktree_path,
+                            worktree_branch=worktree_branch,
+                            started=started,
+                            skills=[s.name for s in skills_selected],
+                            plugins=list(active_plugin_names),
+                            outcome=outcome,
+                            transcripts=transcripts,
+                            checkpoint=None,
+                            mode=mode,
+                            ws=ws,
+                        )
+                existing_attempts += 1
+                last_outcome = outcome
+                transcripts.append(
+                    {
+                        "attempt": attempt_no,
+                        "assignment_id": assignment.assignment_id,
+                        "harness": current_harness,
+                        "model": current_model,
+                        "exit_code": outcome.exit_code,
+                        "timed_out": outcome.timed_out,
+                        "stdout": outcome.stdout,
+                        "stderr": outcome.stderr,
+                        "session_id": outcome.session_id,
+                    }
+                )
+
+                if outcome.timed_out:
+                    checkpoint = self._capture_checkpoint(
+                        ws, request, workdir, current_harness, current_model,
+                        "timeout", outcome.stdout, assignment.assignment_id, mode,
+                    )
+                    self.storage.update_assignment(
+                        assignment.assignment_id,
+                        status="ended_error",
+                        ended_at=utc_now(),
+                        error_reason="timeout",
                         duration_ms=outcome.duration_ms,
                         exit_code=outcome.exit_code,
                     )
                     return self._terminal_result(
                         request,
-                        status=TaskStatus.FAILED,
+                        status=TaskStatus.TIMEOUT,
                         initial_harness=target,
                         current_harness=current_harness,
                         current_model=current_model,
                         difficulty=difficulty,
                         effort=effort,
-                        summary="Git metadata changed during the assignment; worktree retained for inspection.",
-                        error_detail="git_metadata_tampered",
-                        workdir=workdir,
-                        worktree_path=worktree_path,
-                        worktree_branch=worktree_branch,
-                        started=started,
-                        skills=[s.name for s in skills_selected],
-                        plugins=list(active_plugin_names),
-                        outcome=outcome,
-                        transcripts=transcripts,
-                        checkpoint=None,
-                        mode=mode,
-                        ws=ws,
-                    )
-            existing_attempts += 1
-            last_outcome = outcome
-            transcripts.append(
-                {
-                    "attempt": attempt_no,
-                    "assignment_id": assignment.assignment_id,
-                    "harness": current_harness,
-                    "model": current_model,
-                    "exit_code": outcome.exit_code,
-                    "timed_out": outcome.timed_out,
-                    "stdout": outcome.stdout,
-                    "stderr": outcome.stderr,
-                    "session_id": outcome.session_id,
-                }
-            )
-
-            if outcome.timed_out:
-                checkpoint = self._capture_checkpoint(
-                    ws, request, workdir, current_harness, current_model,
-                    "timeout", outcome.stdout, assignment.assignment_id, mode,
-                )
-                self.storage.update_assignment(
-                    assignment.assignment_id,
-                    status="ended_error",
-                    ended_at=utc_now(),
-                    error_reason="timeout",
-                    duration_ms=outcome.duration_ms,
-                    exit_code=outcome.exit_code,
-                )
-                return self._terminal_result(
-                    request,
-                    status=TaskStatus.TIMEOUT,
-                    initial_harness=target,
-                    current_harness=current_harness,
-                    current_model=current_model,
-                    difficulty=difficulty,
-                    effort=effort,
-                    summary=f"Assignment timed out on {current_harness}/{current_model} after {timeout_seconds}s.",
-                    error_detail="timeout",
-                    workdir=workdir,
-                    worktree_path=worktree_path,
-                    worktree_branch=worktree_branch,
-                    started=started,
-                    skills=[s.name for s in skills_selected],
-                    plugins=list(active_plugin_names),
-                    outcome=outcome,
-                    transcripts=transcripts,
-                    checkpoint=checkpoint,
-                    mode=mode,
-                    ws=ws,
-                )
-
-            # Error classification only applies to failed assignments. A
-            # successful report may legitimately mention "429" or
-            # "model_not_found" while describing completed work; treating that
-            # as a live quota/auth event would fail or reroute the ticket.
-            outcome_failed = outcome.exit_code != 0 or outcome.error_detail is not None
-            if outcome_failed:
-                is_quota, account_wide, quota_reason, retry_after = QuotaErrorDetector.detect_quota_exhaustion(
-                    outcome.stdout, outcome.stderr, outcome.exit_code
-                )
-                unauthorized, unauthorized_reason = QuotaErrorDetector.detect_unauthorized(
-                    outcome.stdout, outcome.stderr, outcome.exit_code
-                )
-                transient, transient_reason = QuotaErrorDetector.detect_transient(
-                    outcome.stdout, outcome.stderr, outcome.exit_code
-                )
-            else:
-                is_quota, account_wide, quota_reason, retry_after = False, False, "", None
-                unauthorized, unauthorized_reason = False, ""
-                transient, transient_reason = False, ""
-
-            if is_quota:
-                last_error = f"quota exhausted: {quota_reason}"
-                record = self.guardian.record_exhaustion(
-                    current_harness,
-                    current_model,
-                    quota_reason,
-                    is_account_wide=account_wide,
-                    retry_after_seconds=retry_after,
-                )
-                self.storage.enqueue_effect(
-                    "quota_probe",
-                    f"{current_harness}::{record.model}",
-                    {"harness": current_harness, "model": record.model},
-                )
-                self.storage.update_assignment(
-                    assignment.assignment_id,
-                    status="ended_quota",
-                    ended_at=utc_now(),
-                    error_reason=quota_reason,
-                    duration_ms=outcome.duration_ms,
-                    exit_code=outcome.exit_code,
-                    session_id=outcome.session_id,
-                )
-                checkpoint = self._capture_checkpoint(
-                    ws, request, workdir, current_harness, current_model,
-                    f"quota_exhausted:{quota_reason}", outcome.stdout, assignment.assignment_id, mode,
-                )
-                self.storage.update_task(
-                    request.task_id,
-                    checkpoint_json=checkpoint,
-                    blocked_harness=current_harness,
-                    blocked_model=current_model,
-                )
-                policy = request.on_quota_exhausted
-                if policy == QuotaExhaustedPolicy.FAIL:
-                    return self._terminal_result(
-                        request,
-                        status=TaskStatus.FAILED,
-                        initial_harness=target,
-                        current_harness=current_harness,
-                        current_model=current_model,
-                        difficulty=difficulty,
-                        effort=effort,
-                        summary=f"Quota exhausted on {current_harness}/{current_model}: {quota_reason}.",
-                        error_detail=quota_reason,
+                        summary=f"Assignment timed out on {current_harness}/{current_model} after {timeout_seconds}s.",
+                        error_detail="timeout",
                         workdir=workdir,
                         worktree_path=worktree_path,
                         worktree_branch=worktree_branch,
@@ -681,33 +609,85 @@ class MeshRouter:
                         mode=mode,
                         ws=ws,
                     )
-                if policy == QuotaExhaustedPolicy.WAIT_AND_RESUME:
-                    return self._waiting_result(
-                        request,
-                        target,
+
+                # Error classification only applies to failed assignments. A
+                # successful report may legitimately mention "429" or
+                # "model_not_found" while describing completed work; treating that
+                # as a live quota/auth event would fail or reroute the ticket.
+                outcome_failed = outcome.exit_code != 0 or outcome.error_detail is not None
+                if outcome_failed:
+                    is_quota, account_wide, quota_reason, retry_after = QuotaErrorDetector.detect_quota_exhaustion(
+                        outcome.stdout, outcome.stderr, outcome.exit_code
+                    )
+                    unauthorized, unauthorized_reason = QuotaErrorDetector.detect_unauthorized(
+                        outcome.stdout, outcome.stderr, outcome.exit_code
+                    )
+                    transient, transient_reason = QuotaErrorDetector.detect_transient(
+                        outcome.stdout, outcome.stderr, outcome.exit_code
+                    )
+                else:
+                    is_quota, account_wide, quota_reason, retry_after = False, False, "", None
+                    unauthorized, unauthorized_reason = False, ""
+                    transient, transient_reason = False, ""
+
+                if is_quota:
+                    last_error = f"quota exhausted: {quota_reason}"
+                    record = self.guardian.record_exhaustion(
                         current_harness,
                         current_model,
-                        difficulty,
-                        effort,
-                        workdir,
-                        worktree_path,
-                        worktree_branch,
-                        started,
-                        skills_selected,
-                        active_plugin_names,
-                        outcome,
-                        transcripts,
-                        checkpoint,
-                        mode,
-                        ws,
                         quota_reason,
+                        is_account_wide=account_wide,
+                        retry_after_seconds=retry_after,
                     )
-                exclude_pairs.add((current_harness, current_model))
-                pair = await self._pick_failover(
-                    request, root, current_harness, current_model, exclude_pairs, difficulty
-                )
-                if pair is None:
-                    if self.config.suspend_when_no_candidate:
+                    self.storage.enqueue_effect(
+                        "quota_probe",
+                        f"{current_harness}::{record.model}",
+                        {"harness": current_harness, "model": record.model},
+                    )
+                    self.storage.update_assignment(
+                        assignment.assignment_id,
+                        status="ended_quota",
+                        ended_at=utc_now(),
+                        error_reason=quota_reason,
+                        duration_ms=outcome.duration_ms,
+                        exit_code=outcome.exit_code,
+                        session_id=outcome.session_id,
+                    )
+                    checkpoint = self._capture_checkpoint(
+                        ws, request, workdir, current_harness, current_model,
+                        f"quota_exhausted:{quota_reason}", outcome.stdout, assignment.assignment_id, mode,
+                    )
+                    self.storage.update_task(
+                        request.task_id,
+                        checkpoint_json=checkpoint,
+                        blocked_harness=current_harness,
+                        blocked_model=current_model,
+                    )
+                    policy = request.on_quota_exhausted
+                    if policy == QuotaExhaustedPolicy.FAIL:
+                        return self._terminal_result(
+                            request,
+                            status=TaskStatus.FAILED,
+                            initial_harness=target,
+                            current_harness=current_harness,
+                            current_model=current_model,
+                            difficulty=difficulty,
+                            effort=effort,
+                            summary=f"Quota exhausted on {current_harness}/{current_model}: {quota_reason}.",
+                            error_detail=quota_reason,
+                            workdir=workdir,
+                            worktree_path=worktree_path,
+                            worktree_branch=worktree_branch,
+                            started=started,
+                            skills=[s.name for s in skills_selected],
+                            plugins=list(active_plugin_names),
+                            outcome=outcome,
+                            transcripts=transcripts,
+                            checkpoint=checkpoint,
+                            mode=mode,
+                            ws=ws,
+                        )
+                    if policy == QuotaExhaustedPolicy.WAIT_AND_RESUME:
                         return self._waiting_result(
                             request,
                             target,
@@ -728,6 +708,117 @@ class MeshRouter:
                             ws,
                             quota_reason,
                         )
+                    exclude_pairs.add((current_harness, current_model))
+                    pair = await self._pick_failover(
+                        request, root, current_harness, current_model, exclude_pairs, difficulty
+                    )
+                    if pair is None:
+                        if self.config.suspend_when_no_candidate:
+                            return self._waiting_result(
+                                request,
+                                target,
+                                current_harness,
+                                current_model,
+                                difficulty,
+                                effort,
+                                workdir,
+                                worktree_path,
+                                worktree_branch,
+                                started,
+                                skills_selected,
+                                active_plugin_names,
+                                outcome,
+                                transcripts,
+                                checkpoint,
+                                mode,
+                                ws,
+                                quota_reason,
+                            )
+                        return self._terminal_result(
+                            request,
+                            status=TaskStatus.FAILED,
+                            initial_harness=target,
+                            current_harness=current_harness,
+                            current_model=current_model,
+                            difficulty=difficulty,
+                            effort=effort,
+                            summary="All candidate harnesses are quota exhausted.",
+                            error_detail="quota_exhausted_all_candidates",
+                            workdir=workdir,
+                            worktree_path=worktree_path,
+                            worktree_branch=worktree_branch,
+                            started=started,
+                            skills=[s.name for s in skills_selected],
+                            plugins=list(active_plugin_names),
+                            outcome=outcome,
+                            transcripts=transcripts,
+                            checkpoint=checkpoint,
+                            mode=mode,
+                            ws=ws,
+                        )
+                    new_harness, new_model = pair
+                    hop = FailoverHop(
+                        attempt=attempt_no,
+                        from_harness=current_harness,
+                        from_model=current_model,
+                        to_harness=new_harness,
+                        to_model=new_model,
+                        reason=f"quota_exhausted:{quota_reason}",
+                        preserved_files=list(checkpoint.partial_modified_files),
+                    )
+                    self.storage.add_failover_hop(request.task_id, hop)
+                    current_harness, current_model = new_harness, new_model
+                    continue
+
+                if unauthorized and not is_quota:
+                    last_error = f"model unauthorized: {unauthorized_reason}"
+                    if unauthorized_reason == "not_logged_in":
+                        # Credentials are harness-wide, not model-scoped: open the
+                        # account circuit so failover skips the whole harness.
+                        self.guardian.record_exhaustion(
+                            current_harness,
+                            "*",
+                            unauthorized_reason,
+                            is_account_wide=True,
+                        )
+                    else:
+                        try:
+                            self.discovery.mark_model_unauthorized(current_harness, current_model)
+                        except Exception:
+                            pass
+                    self.storage.update_assignment(
+                        assignment.assignment_id,
+                        status="ended_error",
+                        ended_at=utc_now(),
+                        error_reason=f"model_unauthorized:{unauthorized_reason}",
+                        duration_ms=outcome.duration_ms,
+                        exit_code=outcome.exit_code,
+                        session_id=outcome.session_id,
+                    )
+                    exclude_pairs.add((current_harness, current_model))
+                    if mode == WorkspaceMode.ISOLATED_WORKTREE:
+                        checkpoint = self._capture_checkpoint(
+                            ws, request, workdir, current_harness, current_model,
+                            f"model_unauthorized:{unauthorized_reason}", outcome.stdout,
+                            assignment.assignment_id, mode,
+                        )
+                    pair = await self._pick_failover(
+                        request, root, current_harness, current_model, exclude_pairs, difficulty
+                    )
+                    if pair is not None:
+                        new_harness, new_model = pair
+                        hop = FailoverHop(
+                            attempt=attempt_no,
+                            from_harness=current_harness,
+                            from_model=current_model,
+                            to_harness=new_harness,
+                            to_model=new_model,
+                            reason=f"model_unauthorized:{unauthorized_reason}",
+                            preserved_files=list(checkpoint.partial_modified_files) if checkpoint else [],
+                        )
+                        self.storage.add_failover_hop(request.task_id, hop)
+                        current_harness, current_model = new_harness, new_model
+                        continue
                     return self._terminal_result(
                         request,
                         status=TaskStatus.FAILED,
@@ -736,8 +827,8 @@ class MeshRouter:
                         current_model=current_model,
                         difficulty=difficulty,
                         effort=effort,
-                        summary="All candidate harnesses are quota exhausted.",
-                        error_detail="quota_exhausted_all_candidates",
+                        summary=f"Model {current_model} is no longer authorised and no alternative remains.",
+                        error_detail=f"model_unauthorized:{unauthorized_reason}",
                         workdir=workdir,
                         worktree_path=worktree_path,
                         worktree_branch=worktree_branch,
@@ -750,175 +841,96 @@ class MeshRouter:
                         mode=mode,
                         ws=ws,
                     )
-                new_harness, new_model = pair
-                hop = FailoverHop(
-                    attempt=attempt_no,
-                    from_harness=current_harness,
-                    from_model=current_model,
-                    to_harness=new_harness,
-                    to_model=new_model,
-                    reason=f"quota_exhausted:{quota_reason}",
-                    preserved_files=list(checkpoint.partial_modified_files),
-                )
-                self.storage.add_failover_hop(request.task_id, hop)
-                current_harness, current_model = new_harness, new_model
-                continue
 
-            if unauthorized and not is_quota:
-                last_error = f"model unauthorized: {unauthorized_reason}"
-                if unauthorized_reason == "not_logged_in":
-                    # Credentials are harness-wide, not model-scoped: open the
-                    # account circuit so failover skips the whole harness.
-                    self.guardian.record_exhaustion(
-                        current_harness,
-                        "*",
-                        unauthorized_reason,
-                        is_account_wide=True,
+                if outcome.error_detail or outcome.exit_code != 0:
+                    last_error = outcome.error_detail or outcome.stderr.strip()[-1000:] or f"exit {outcome.exit_code}"
+                    self.storage.update_assignment(
+                        assignment.assignment_id,
+                        status="ended_error",
+                        ended_at=utc_now(),
+                        error_reason=last_error[:800],
+                        duration_ms=outcome.duration_ms,
+                        exit_code=outcome.exit_code,
+                        session_id=outcome.session_id,
                     )
-                else:
-                    try:
-                        self.discovery.mark_model_unauthorized(current_harness, current_model)
-                    except Exception:
-                        pass
-                self.storage.update_assignment(
-                    assignment.assignment_id,
-                    status="ended_error",
-                    ended_at=utc_now(),
-                    error_reason=f"model_unauthorized:{unauthorized_reason}",
-                    duration_ms=outcome.duration_ms,
-                    exit_code=outcome.exit_code,
-                    session_id=outcome.session_id,
-                )
-                exclude_pairs.add((current_harness, current_model))
-                if mode == WorkspaceMode.ISOLATED_WORKTREE:
-                    checkpoint = self._capture_checkpoint(
-                        ws, request, workdir, current_harness, current_model,
-                        f"model_unauthorized:{unauthorized_reason}", outcome.stdout,
-                        assignment.assignment_id, mode,
-                    )
-                pair = await self._pick_failover(
-                    request, root, current_harness, current_model, exclude_pairs, difficulty
-                )
-                if pair is not None:
-                    new_harness, new_model = pair
-                    hop = FailoverHop(
-                        attempt=attempt_no,
-                        from_harness=current_harness,
-                        from_model=current_model,
-                        to_harness=new_harness,
-                        to_model=new_model,
-                        reason=f"model_unauthorized:{unauthorized_reason}",
-                        preserved_files=list(checkpoint.partial_modified_files) if checkpoint else [],
-                    )
-                    self.storage.add_failover_hop(request.task_id, hop)
-                    current_harness, current_model = new_harness, new_model
-                    continue
-                return self._terminal_result(
-                    request,
-                    status=TaskStatus.FAILED,
-                    initial_harness=target,
-                    current_harness=current_harness,
-                    current_model=current_model,
-                    difficulty=difficulty,
-                    effort=effort,
-                    summary=f"Model {current_model} is no longer authorised and no alternative remains.",
-                    error_detail=f"model_unauthorized:{unauthorized_reason}",
-                    workdir=workdir,
-                    worktree_path=worktree_path,
-                    worktree_branch=worktree_branch,
-                    started=started,
-                    skills=[s.name for s in skills_selected],
-                    plugins=list(active_plugin_names),
-                    outcome=outcome,
-                    transcripts=transcripts,
-                    checkpoint=checkpoint,
-                    mode=mode,
-                    ws=ws,
-                )
-
-            if outcome.error_detail or outcome.exit_code != 0:
-                last_error = outcome.error_detail or outcome.stderr.strip()[-1000:] or f"exit {outcome.exit_code}"
-                self.storage.update_assignment(
-                    assignment.assignment_id,
-                    status="ended_error",
-                    ended_at=utc_now(),
-                    error_reason=last_error[:800],
-                    duration_ms=outcome.duration_ms,
-                    exit_code=outcome.exit_code,
-                    session_id=outcome.session_id,
-                )
-                if transient and transient_count < max(0, int(self.config.transient_retries)):
-                    transient_count += 1
-                    checkpoint = self._capture_checkpoint(
-                        ws, request, workdir, current_harness, current_model,
-                        f"transient:{transient_reason}", outcome.stdout, assignment.assignment_id, mode,
-                    )
-                    await self.sleep_fn(0.25)
-                    continue
-                checkpoint = self._capture_checkpoint(
-                    ws, request, workdir, current_harness, current_model,
-                    f"execution_error:{last_error[:200]}", outcome.stdout, assignment.assignment_id, mode,
-                )
-                exclude_pairs.add((current_harness, current_model))
-                if self.config.failover_on_error and request.on_quota_exhausted != QuotaExhaustedPolicy.FAIL:
-                    pair = await self._pick_failover(
-                        request, root, current_harness, current_model, exclude_pairs, difficulty
-                    )
-                    if pair is not None:
-                        new_harness, new_model = pair
-                        hop = FailoverHop(
-                            attempt=attempt_no,
-                            from_harness=current_harness,
-                            from_model=current_model,
-                            to_harness=new_harness,
-                            to_model=new_model,
-                            reason=f"execution_error:{last_error[:200]}",
-                            preserved_files=list(checkpoint.partial_modified_files) if checkpoint else [],
+                    if transient and transient_count < max(0, int(self.config.transient_retries)):
+                        transient_count += 1
+                        checkpoint = self._capture_checkpoint(
+                            ws, request, workdir, current_harness, current_model,
+                            f"transient:{transient_reason}", outcome.stdout, assignment.assignment_id, mode,
                         )
-                        self.storage.add_failover_hop(request.task_id, hop)
-                        current_harness, current_model = new_harness, new_model
+                        await self.sleep_fn(0.25)
                         continue
-                return self._terminal_result(
-                    request,
-                    status=TaskStatus.FAILED,
-                    initial_harness=target,
-                    current_harness=current_harness,
-                    current_model=current_model,
-                    difficulty=difficulty,
-                    effort=effort,
-                    summary=f"Assignment failed on {current_harness}/{current_model}: {last_error[:300]}",
-                    error_detail=last_error[:1000],
-                    workdir=workdir,
-                    worktree_path=worktree_path,
-                    worktree_branch=worktree_branch,
-                    started=started,
-                    skills=[s.name for s in skills_selected],
-                    plugins=list(active_plugin_names),
-                    outcome=outcome,
-                    transcripts=transcripts,
-                    checkpoint=checkpoint,
-                    mode=mode,
-                    ws=ws,
-                )
+                    checkpoint = self._capture_checkpoint(
+                        ws, request, workdir, current_harness, current_model,
+                        f"execution_error:{last_error[:200]}", outcome.stdout, assignment.assignment_id, mode,
+                    )
+                    exclude_pairs.add((current_harness, current_model))
+                    if self.config.failover_on_error and request.on_quota_exhausted != QuotaExhaustedPolicy.FAIL:
+                        pair = await self._pick_failover(
+                            request, root, current_harness, current_model, exclude_pairs, difficulty
+                        )
+                        if pair is not None:
+                            new_harness, new_model = pair
+                            hop = FailoverHop(
+                                attempt=attempt_no,
+                                from_harness=current_harness,
+                                from_model=current_model,
+                                to_harness=new_harness,
+                                to_model=new_model,
+                                reason=f"execution_error:{last_error[:200]}",
+                                preserved_files=list(checkpoint.partial_modified_files) if checkpoint else [],
+                            )
+                            self.storage.add_failover_hop(request.task_id, hop)
+                            current_harness, current_model = new_harness, new_model
+                            continue
+                    return self._terminal_result(
+                        request,
+                        status=TaskStatus.FAILED,
+                        initial_harness=target,
+                        current_harness=current_harness,
+                        current_model=current_model,
+                        difficulty=difficulty,
+                        effort=effort,
+                        summary=f"Assignment failed on {current_harness}/{current_model}: {last_error[:300]}",
+                        error_detail=last_error[:1000],
+                        workdir=workdir,
+                        worktree_path=worktree_path,
+                        worktree_branch=worktree_branch,
+                        started=started,
+                        skills=[s.name for s in skills_selected],
+                        plugins=list(active_plugin_names),
+                        outcome=outcome,
+                        transcripts=transcripts,
+                        checkpoint=checkpoint,
+                        mode=mode,
+                        ws=ws,
+                    )
 
-            # A valid assistant response is the only proof that closes circuits.
-            self.guardian.record_success(current_harness, current_model)
-            summary_text, _truncated = cap_text(
-                outcome.assistant_text.strip() or "assignment completed",
-                self.config.summary_max_chars,
-            )
-            self.storage.update_assignment(
-                assignment.assignment_id,
-                status="completed",
-                ended_at=utc_now(),
-                report_summary=summary_text,
-                duration_ms=outcome.duration_ms,
-                exit_code=outcome.exit_code,
-                session_id=outcome.session_id,
-            )
-            last_error = ""
-            success = True
-            break
+                # A valid assistant response is the only proof that closes circuits.
+                self.guardian.record_success(current_harness, current_model)
+                summary_text, _truncated = cap_text(
+                    outcome.assistant_text.strip() or "assignment completed",
+                    self.config.summary_max_chars,
+                )
+                self.storage.update_assignment(
+                    assignment.assignment_id,
+                    status="completed",
+                    ended_at=utc_now(),
+                    report_summary=summary_text,
+                    duration_ms=outcome.duration_ms,
+                    exit_code=outcome.exit_code,
+                    session_id=outcome.session_id,
+                )
+                last_error = ""
+                success = True
+                break
+        except asyncio.CancelledError:
+            self._close_open_assignments(assignment_ids, "cancelled")
+            raise
+        except Exception:
+            self._close_open_assignments(assignment_ids, "dispatch_exception")
+            raise
 
         if not success:
             error = last_error or "all assignment attempts were exhausted"
@@ -1546,6 +1558,33 @@ class MeshRouter:
                 summary=message,
                 error_detail=message,
             )
+
+    def _close_open_assignments(self, assignment_ids: Sequence[str], reason: str) -> None:
+        """Close rows this dispatch opened but never finished.
+
+        Cancellation and unexpected failures unwind past the normal
+        per-assignment cleanup.  A row left in ``running`` keeps its
+        dispatcher pid alive in the eyes of ``count_live_assignments`` and
+        holds a ``max_active_assignments`` slot until that process exits.
+        """
+
+        open_ids = {str(item) for item in assignment_ids}
+        if not open_ids:
+            return
+        try:
+            rows = self.storage.list_running_assignments()
+        except Exception:
+            return
+        for row in rows:
+            if row.assignment_id not in open_ids:
+                continue
+            with contextlib.suppress(Exception):
+                self.storage.update_assignment(
+                    row.assignment_id,
+                    status="ended_error",
+                    ended_at=utc_now(),
+                    error_reason=reason,
+                )
 
     def _persist_cancelled(self, task_id: str) -> None:
         try:
