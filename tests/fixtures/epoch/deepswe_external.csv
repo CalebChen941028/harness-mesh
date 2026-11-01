@@ -18,3 +18,4 @@ gpt-6-astra_high,0.7323008849557522,mini-swe-agent,high,2026-09-03,OpenAI
 gpt-6-astra_max,0.7323008849557522,mini-swe-agent,max,2026-09-03,OpenAI
 gpt-6-astra_medium,0.7278761061946902,mini-swe-agent,medium,2026-09-03,OpenAI
 gpt-6-astra_low,0.6703539823008849,mini-swe-agent,low,2026-09-03,OpenAI
+kimi-k2.7-code,0.3053097345132743,mini-swe-agent,,2026-06-12,Moonshot

@@ -18,3 +18,5 @@ claude-opus-4-6_unknown,0.2664,claude-code,high,2026-02-05,Anthropic
 glm-5.2_none,0.245,mini-swe-agent,none,2026-06-16,Z.ai (Zhipu AI)
 claude-sonnet-4-6_unknown,0.24310000000000004,claude-code,max,2026-02-17,Anthropic
 deepseek-v4-pro_none,0.1764,mini-swe-agent,none,2026-04-24,DeepSeek
+kimi-k2.7-code,0.3006,mini-swe-agent,none,2026-06-12,Moonshot
+MiniMax-M3,0.147,mini-swe-agent,none,2026-06-01,MiniMax

@@ -156,6 +156,7 @@ class ModelMatch(BaseModel):
     confidence: str = "none"  # exact | normalized | alias | none
     effort_variant: str | None = None
     matched_name: str | None = None
+    note: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -555,12 +556,16 @@ def parse_models_dev(
     """Fold models.dev's provider-oriented catalogue into canonical models.
 
     models.dev lists the same model once per provider (original vendors, hosted
-    platforms and several hundred resale gateways).  The canonical model is
-    identified by ``canonical_model_id`` when present and by the model name
-    otherwise.  Prices follow the documented precedence: a first-party vendor's
-    own entry, then the median of the priced offers.  OpenRouter's price is
-    applied later by :func:`merge_market_models` when no first-party entry
-    exists.
+    platforms and several hundred resale gateways).  Entries from an original
+    vendor, or entries that carry a ``canonical_model_id``, define a canonical
+    model.  Every other row is folded into the canonical model with the same
+    normalised name after dropping its provider prefix.  Rows with no canonical
+    counterpart merge with each other under one ``unknown/<name>`` key instead
+    of each keeping a ``provider/name`` entry.
+
+    Prices follow the documented precedence: a first-party vendor's own entry,
+    then the median of the priced offers.  OpenRouter's price is applied later
+    by :func:`merge_market_models` when no first-party entry exists.
     """
 
     if not isinstance(payload, dict):
@@ -570,8 +575,7 @@ def parse_models_dev(
         str(item).strip().lower() for item in first_party_providers if str(item).strip()
     ]
 
-    groups: dict[str, list[dict[str, Any]]] = {}
-    order: list[str] = []
+    records: list[dict[str, Any]] = []
     for provider_id, provider in payload.items():
         if not isinstance(provider, dict):
             continue
@@ -600,7 +604,6 @@ def parse_models_dev(
                     canonical_name = canonical_id
             if not canonical_name:
                 canonical_name = raw_id.split("/")[-1] or name
-            group_id = canonical_model_key(canonical_vendor, canonical_name)
             cost = entry.get("cost") if isinstance(entry.get("cost"), dict) else {}
             limit = entry.get("limit") if isinstance(entry.get("limit"), dict) else {}
             input_price = _finite_number(cost.get("input"))
@@ -608,7 +611,8 @@ def parse_models_dev(
             if _is_placeholder_price(input_price, output_price):
                 input_price = None
                 output_price = None
-            groups.setdefault(group_id, []).append(
+            provider_field = entry.get("provider")
+            records.append(
                 {
                     "provider": provider_name,
                     "raw_id": raw_id,
@@ -616,6 +620,10 @@ def parse_models_dev(
                     "canonical_id": canonical_id,
                     "canonical_vendor": canonical_vendor,
                     "canonical_name": canonical_name,
+                    "identity": _normalize_name(canonical_name),
+                    "creator": _vendor_slug(provider_field)
+                    if isinstance(provider_field, str)
+                    else "",
                     "input": input_price,
                     "output": output_price,
                     "cache_read": _finite_number(cost.get("cache_read")),
@@ -625,36 +633,84 @@ def parse_models_dev(
                     "release_date": _iso_date(entry.get("release_date")),
                 }
             )
-            if group_id not in order:
-                order.append(group_id)
 
-    models: list[MarketModel] = []
-    for group_id in order:
-        records = groups[group_id]
-        providers = {record["provider"] for record in records}
+    # A row defines a canonical model when it comes from an original vendor or
+    # names the canonical model explicitly.  Both are authoritative even when
+    # the two catalogues spell the model name differently.
+    canonical: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for record in records:
+        if record["provider"] not in first_party and not record["canonical_id"]:
+            continue
+        identity = record["identity"]
+        canonical.setdefault(identity, []).append(record)
+        if identity not in order:
+            order.append(identity)
+
+    # Resale-only rows join the canonical model with the same normalised name.
+    # Without one they all merge together instead of each becoming a model.
+    orphans: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        if record["provider"] in first_party or record["canonical_id"]:
+            continue
+        identity = record["identity"]
+        if identity in canonical:
+            canonical[identity].append(record)
+        else:
+            orphans.setdefault(identity, []).append(record)
+
+    def build(
+        group: list[dict[str, Any]], *, fallback_vendor: str | None = None
+    ) -> MarketModel:
+        providers = {record["provider"] for record in group}
+        provider_slugs = {_vendor_slug(provider) for provider in providers}
+        # The canonical id names the creator, but resellers sometimes publish
+        # their own id first.  Prefer the id of an original vendor present in
+        # this group, then any id whose vendor also has a catalogue entry here.
         canonical_vendor = next(
-            (record["canonical_vendor"] for record in records if record["canonical_vendor"]),
+            (
+                record["canonical_vendor"]
+                for record in group
+                if record["canonical_vendor"] and record["provider"] in first_party
+            ),
+            "",
+        ) or next(
+            (
+                record["canonical_vendor"]
+                for record in group
+                if record["canonical_vendor"]
+                and record["canonical_vendor"] in provider_slugs
+            ),
+            "",
+        ) or next(
+            (record["canonical_vendor"] for record in group if record["canonical_vendor"]),
             "",
         )
         canonical_name = next(
-            (record["canonical_name"] for record in records if record["canonical_name"]),
-            records[0]["name"],
+            (record["canonical_name"] for record in group if record["canonical_name"]),
+            group[0]["name"],
         )
         first_party_vendor = next(
             (provider for provider in first_party if provider in providers), ""
         )
-        vendor = (
-            canonical_vendor
-            or _vendor_slug(first_party_vendor)
-            or records[0]["provider"]
-        )
+        if fallback_vendor is None:
+            vendor = (
+                canonical_vendor
+                or _vendor_slug(first_party_vendor)
+                or group[0]["provider"]
+            )
+        else:
+            creator = next(
+                (record["creator"] for record in group if record["creator"]), ""
+            )
+            vendor = creator or fallback_vendor
         key = canonical_model_key(vendor, canonical_name)
 
         first_party_record: dict[str, Any] | None = None
         for provider in first_party:
             matches = [
                 record
-                for record in records
+                for record in group
                 if record["provider"] == provider
                 and not (record["input"] is None and record["output"] is None)
             ]
@@ -668,7 +724,7 @@ def parse_models_dev(
 
         priced = [
             record
-            for record in records
+            for record in group
             if not (record["input"] is None and record["output"] is None)
         ]
         if first_party_record is not None:
@@ -686,12 +742,12 @@ def parse_models_dev(
             input_price = output_price = cache_read = None
 
         representative = first_party_record or next(
-            (record for record in records if record["provider"] == vendor), records[0]
+            (record for record in group if record["provider"] == vendor), group[0]
         )
         context_window = next(
             (
                 record["context_window"]
-                for record in [representative, *records]
+                for record in [representative, *group]
                 if record["context_window"] is not None
             ),
             None,
@@ -699,14 +755,14 @@ def parse_models_dev(
         release_date = next(
             (
                 record["release_date"]
-                for record in [representative, *records]
+                for record in [representative, *group]
                 if record["release_date"] is not None
             ),
             None,
         )
         aliases: list[str] = []
         canonical_identity = _normalize_name(canonical_name)
-        for record in records:
+        for record in group:
             raw_identity = _normalize_name(record["raw_id"].split("/")[-1])
             # Only ids that differ from the canonical name by punctuation or a
             # vendor prefix are safe aliases.  A reseller's marketing name for
@@ -715,24 +771,27 @@ def parse_models_dev(
                 _add_unique(aliases, [record["raw_id"]])
             _add_unique(aliases, [record["canonical_id"]])
         _add_unique(aliases, [canonical_name])
-        models.append(
-            MarketModel(
-                key=key,
-                vendor=vendor,
-                name=representative["name"],
-                input_per_mtok=input_price,
-                output_per_mtok=output_price,
-                cache_read_per_mtok=cache_read,
-                context_window=context_window,
-                reasoning=any(record["reasoning"] for record in records),
-                tool_call=any(record["tool_call"] for record in records),
-                release_date=release_date,
-                price_source=price_source,
-                sources=["models.dev"],
-                aliases=aliases[:40],
-                fetched_at=now,
-            )
+        return MarketModel(
+            key=key,
+            vendor=vendor,
+            name=representative["name"],
+            input_per_mtok=input_price,
+            output_per_mtok=output_price,
+            cache_read_per_mtok=cache_read,
+            context_window=context_window,
+            reasoning=any(record["reasoning"] for record in group),
+            tool_call=any(record["tool_call"] for record in group),
+            release_date=release_date,
+            price_source=price_source,
+            sources=["models.dev"],
+            aliases=aliases[:40],
+            fetched_at=now,
         )
+
+    models: list[MarketModel] = [build(canonical[identity]) for identity in order]
+    models.extend(
+        build(orphans[identity], fallback_vendor="unknown") for identity in orphans
+    )
     return models
 
 
@@ -1397,6 +1456,69 @@ def _market_identities(model: MarketModel) -> tuple[list[str], str]:
     return exact, _normalize_name(model.key.split("/", 1)[-1])
 
 
+def _preferred_candidate(
+    keys: Sequence[str], by_key: Mapping[str, MarketModel]
+) -> tuple[list[str], str | None]:
+    """Narrow ambiguous candidates by data quality, in the documented order.
+
+    Evaluation data beats a bare catalogue row, a direct OpenRouter or
+    first-party offer beats an unknown reseller, and a priced row beats one
+    without a price.  Each step only narrows when it leaves at least one
+    candidate; a tie keeps every candidate for the next step.
+    """
+
+    candidates = list(dict.fromkeys(keys))
+
+    def evaluated(key: str) -> bool:
+        model = by_key[key]
+        sources = set(_sources_for(model))
+        return (
+            bool({"epoch", "epoch_ai", "artificial_analysis"} & sources)
+            or model.intelligence_source in {"epoch_ai", "artificial_analysis"}
+        )
+
+    narrowed = [key for key in candidates if evaluated(key)]
+    if len(narrowed) == 1:
+        return narrowed, "preferred the candidate with benchmark data"
+    if narrowed:
+        candidates = narrowed
+
+    def direct(key: str) -> bool:
+        model = by_key[key]
+        return "openrouter" in _sources_for(model) or model.price_source == "first_party"
+
+    narrowed = [key for key in candidates if direct(key)]
+    if len(narrowed) == 1:
+        return narrowed, "preferred the OpenRouter or first-party candidate"
+    if narrowed:
+        candidates = narrowed
+
+    narrowed = [key for key in candidates if _has_price(by_key[key])]
+    if len(narrowed) == 1:
+        return narrowed, "preferred the candidate with a price"
+    if narrowed:
+        candidates = narrowed
+    return candidates, None
+
+
+def _match_ambiguous(
+    keys: Sequence[str],
+    by_key: Mapping[str, MarketModel],
+    confidence: str,
+    effort: str | None,
+) -> ModelMatch:
+    candidates, note = _preferred_candidate(keys, by_key)
+    if len(candidates) == 1:
+        return ModelMatch(
+            key=candidates[0],
+            confidence="normalized",
+            effort_variant=effort,
+            matched_name=by_key[candidates[0]].name,
+            note=note,
+        )
+    return ModelMatch(confidence="none", effort_variant=effort)
+
+
 def match_model(
     model_id: str,
     models: Sequence[MarketModel],
@@ -1405,8 +1527,10 @@ def match_model(
 ) -> ModelMatch:
     """Map one harness model id onto the catalogue without guessing.
 
-    Exact identities win over normalised ones, an explicit alias wins over
-    both, and any ambiguity resolves to ``none`` rather than a wrong match.
+    Exact identities win over normalised ones and an explicit alias wins over
+    both.  When several entries share the identity, evidence quality picks one
+    (benchmarks, then a direct OpenRouter/first-party offer, then a price).
+    Candidates that remain tied still resolve to ``none``.
     """
 
     name, effort = _split_identity(model_id)
@@ -1450,7 +1574,7 @@ def match_model(
     if len(untouched_targets) == 1:
         return _match(untouched_targets[0], by_key, "exact", None)
     if len(untouched_targets) > 1:
-        return ModelMatch(confidence="none", effort_variant=None)
+        return _match_ambiguous(untouched_targets, by_key, "exact", None)
 
     # 2a. dot/hyphen and date equivalence without stripping a real ``-max`` name
     full_name = _full_market_identity(model_id)
@@ -1464,7 +1588,7 @@ def match_model(
     if len(full_targets) == 1:
         return _match(full_targets[0], by_key, "normalized", None)
     if len(full_targets) > 1:
-        return ModelMatch(confidence="none", effort_variant=None)
+        return _match_ambiguous(full_targets, by_key, "normalized", None)
 
     # 2b. normalised identity: dot/hyphen equivalence, 8-digit dates, effort
     normalized_name, _ = normalize_model_identity(model_id)
@@ -1480,7 +1604,7 @@ def match_model(
     if len(normalized_targets) == 1:
         return _match(normalized_targets[0], by_key, "normalized", effort)
     if len(normalized_targets) > 1:
-        return ModelMatch(confidence="none", effort_variant=effort)
+        return _match_ambiguous(normalized_targets, by_key, "normalized", effort)
 
     # 3. short snapshot suffixes (``-1017``) only when the folded base is unique
     snapshots = [
@@ -1491,7 +1615,10 @@ def match_model(
     snapshots = list(dict.fromkeys(snapshots))
     if len(snapshots) == 1:
         return _match(snapshots[0], by_key, "normalized", effort)
+    if len(snapshots) > 1:
+        return _match_ambiguous(snapshots, by_key, "normalized", effort)
     return ModelMatch(confidence="none", effort_variant=effort)
+
 
 
 def _match(

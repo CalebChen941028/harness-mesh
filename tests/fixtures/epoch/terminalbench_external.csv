@@ -20,3 +20,9 @@ claude-opus-4-6_unknown,Claude Code,0.579775280899,2026-02-05,Anthropic
 claude-sonnet-4-6_unknown,Simplai Agent,0.534269662921,2026-02-17,Anthropic
 claude-sonnet-4-6,Simplai Agent,0.534,2026-02-17,Anthropic
 glm-5,Terminus 2,0.524157303371,2026-02-11,Z.ai (Zhipu AI)
+MiniMax-M2.7,IndusAGI Coding Agent,0.45056179775300004,2026-03-18,MiniMax
+MiniMax-M2.7,Harness Agent,0.42921348314600005,2026-03-18,MiniMax
+MiniMax-M2.5,cchuter,0.42696629213500004,2026-02-12,MiniMax
+MiniMax-M2.5,Terminus 2,0.422471910112,2026-02-12,MiniMax
+glm-4.7,Terminus 2,0.333895131086,2025-12-22,Z.ai (Zhipu AI)
+glm-4.7,Crux,0.33258426966300003,2025-12-22,Z.ai (Zhipu AI)

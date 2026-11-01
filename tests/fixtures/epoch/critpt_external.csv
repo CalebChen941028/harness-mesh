@@ -71,3 +71,9 @@ deepseek-v4.1-flash_none,0.00285714285714286,2026-09-09,DeepSeek
 gemini-3.5-flash-lite,0.0,2026-07-21,Google DeepMind
 gpt-5.5-instant,0.0,2026-05-05,OpenAI
 deepseek-v4-pro-0813_none,0.0,2026-08-13,DeepSeek
+kimi-k2.7-code,0.1,2026-06-12,Moonshot
+kimi-k2.6,0.08,2026-04-20,Moonshot
+glm-5.1,0.0457142857142857,2026-04-07,Z.ai (Zhipu AI)
+MiniMax-M3,0.0371428571428571,2026-06-01,MiniMax
+glm-4.7,0.0171020408163265,2025-12-22,Z.ai (Zhipu AI)
+MiniMax-M2.7,0.00571428571428571,2026-03-18,MiniMax

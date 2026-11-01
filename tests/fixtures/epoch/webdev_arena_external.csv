@@ -31,3 +31,10 @@ gpt-5.5_unknown,1457.76,2026-04-23,OpenAI
 gemini-3.5-flash-lite,1446.62,2026-07-21,Google DeepMind
 deepseek-v4-pro_none,1445.72,2026-04-24,DeepSeek
 glm-5,1435.91,2026-02-11,Z.ai (Zhipu AI)
+kimi-k2.6,1508.77,2026-04-20,Moonshot
+glm-5.1,1508.29,2026-04-07,Z.ai (Zhipu AI)
+MiniMax-M3,1486.7,2026-06-01,MiniMax
+kimi-k2.7-code,1472.72,2026-06-12,Moonshot
+glm-4.7,1434.7,2025-12-22,Z.ai (Zhipu AI)
+MiniMax-M2.7,1397.52,2026-03-18,MiniMax
+MiniMax-M2.5,1384.13,2026-02-12,MiniMax

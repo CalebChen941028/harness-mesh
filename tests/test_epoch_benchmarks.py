@@ -443,11 +443,14 @@ def test_epoch_axis_scores_are_stored_on_the_catalog_model(tmp_path):
         by_name = {model.key.split("/", 1)[-1]: model for model in catalog.models}
         assert by_name["claude-opus-5-5"].intelligence_coding is not None
         assert by_name["claude-opus-5-5"].intelligence == pytest.approx(
-            (
-                by_name["claude-opus-5-5"].intelligence_reasoning
-                + by_name["claude-opus-5-5"].intelligence_coding
+            round(
+                (
+                    by_name["claude-opus-5-5"].intelligence_reasoning
+                    + by_name["claude-opus-5-5"].intelligence_coding
+                )
+                / 2,
+                2,
             )
-            / 2
         )
     finally:
         store.close()

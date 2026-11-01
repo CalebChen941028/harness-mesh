@@ -12,17 +12,48 @@ import os
 
 import pytest
 
+from harness_mesh.config import MarketConfig
 from harness_mesh.market import (
     ArtificialAnalysisProvider,
+    MarketService,
     ModelsDevProvider,
     OpenRouterProvider,
+    match_model,
 )
+from harness_mesh.storage import StateStore
 from tests.real_machine import real_machine_enabled
 
 pytestmark = pytest.mark.skipif(
     not real_machine_enabled(),
     reason="real network tests are opt-in; set HARNESS_MESH_REAL_MACHINE=1",
 )
+
+ZCODE_MODEL_IDS = [
+    "GLM-5.3",
+    "glm-5.3",
+    "glm-5.1",
+    "glm-5",
+    "glm-4.7",
+    "kimi-k2.6",
+    "kimi-k2.7-code",
+    "minimax-m2.7",
+    "minimax-m2.5",
+    "minimax-m3",
+]
+FIRST_PARTY_PROVIDERS = [
+    "anthropic",
+    "openai",
+    "google",
+    "deepseek",
+    "zai",
+    "zhipuai",
+    "alibaba",
+    "minimax",
+    "minimax-cn",
+    "moonshotai",
+    "xai",
+    "mistral",
+]
 
 
 @pytest.mark.asyncio
@@ -92,3 +123,23 @@ async def test_live_modelsdev_folding_keeps_one_entry_per_model():
         assert len(matches) == 1, (name, [model.key for model in matches])
         assert matches[0].input_per_mtok is not None
         assert matches[0].output_per_mtok is not None
+
+
+@pytest.mark.asyncio
+async def test_live_zcode_models_match_after_a_full_refresh(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    service = MarketService(
+        store,
+        MarketConfig(first_party_providers=FIRST_PARTY_PROVIDERS),
+        env={},
+    )
+    try:
+        result = await service.refresh(force=True)
+        assert result.catalog.models
+        for model_id in ZCODE_MODEL_IDS:
+            match = match_model(model_id, result.catalog.models)
+            assert match.key is not None, (model_id, match)
+            assert match.confidence in {"exact", "normalized"}, (model_id, match)
+    finally:
+        store.close()
+
