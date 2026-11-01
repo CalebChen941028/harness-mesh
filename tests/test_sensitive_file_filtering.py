@@ -1,4 +1,4 @@
-"""Round 2 WP-R1: sensitive filtering must not hide ordinary source files."""
+"""Sensitive filtering must not hide ordinary source files."""
 
 from __future__ import annotations
 

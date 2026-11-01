@@ -1,4 +1,4 @@
-"""Round 2 WP-R5: environment scrubbing covers credential-shaped variables."""
+"""Environment scrubbing covers credential-shaped variables."""
 
 from __future__ import annotations
 

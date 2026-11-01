@@ -348,6 +348,7 @@ hmesh apply <task_id> [--strategy patch|merge|copy] [--force-copy]
 hmesh context list [--category C] [--json]
 hmesh context set <key> <content> [--category C] [--author A] [--task-id T]
 hmesh init-mcp [--print] [--target PATH]
+hmesh version
 ```
 
 ## 配置

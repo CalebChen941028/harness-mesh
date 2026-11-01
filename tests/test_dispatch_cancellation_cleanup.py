@@ -1,4 +1,4 @@
-"""Round 4 WP-R14: cancelled or crashed dispatches must close their Assignment.
+"""Cancelled or crashed dispatches must close their Assignment.
 
 ``_dispatch`` marks an assignment finished on every normal outcome.  Before
 round four, a cancellation or an unhandled exception escaped before that

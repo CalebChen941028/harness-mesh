@@ -1,4 +1,4 @@
-"""Round 2 WP-R6: consistent workspace validation for runtime, install and doctor."""
+"""Consistent workspace validation for runtime, install and doctor."""
 
 from __future__ import annotations
 

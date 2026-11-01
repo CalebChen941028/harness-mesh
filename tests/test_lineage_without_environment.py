@@ -1,4 +1,4 @@
-"""Round 3 WP-R9: lineage must survive hosts that drop the mesh environment.
+"""Lineage must survive hosts that drop the mesh environment.
 
 Codex 0.166 starts MCP servers with only the environment declared in the MCP
 config, so ``HARNESS_MESH_CALL_DEPTH`` and ``HARNESS_MESH_TRACE_CHAIN`` never

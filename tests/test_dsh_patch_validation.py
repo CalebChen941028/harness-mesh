@@ -1,4 +1,4 @@
-"""Round 2 WP-R7: DSH patch validation happens before writes and rolls back."""
+"""DSH patch validation happens before writes and rolls back."""
 
 from __future__ import annotations
 

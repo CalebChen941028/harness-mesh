@@ -1,4 +1,4 @@
-"""Audit WP5: auto-approval gates and built-in runtime environment scrubbing."""
+"""Auto-approval gates and built-in runtime environment scrubbing."""
 
 from __future__ import annotations
 

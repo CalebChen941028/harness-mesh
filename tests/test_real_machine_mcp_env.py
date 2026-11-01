@@ -1,4 +1,4 @@
-"""Round 3 WP-R11: real-machine MCP environment probe.
+"""Real-machine MCP environment probe.
 
 Measured on 2026-11-01 with Claude Code 2.1.309, codex-cli
 0.166.0-alpha.5.1, DeepSeek Harness 0.2.1-rc.5, Antigravity 1.4.12 and

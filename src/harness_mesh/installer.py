@@ -1746,7 +1746,8 @@ _DshLoader.add_constructor("tag:yaml.org,2002:js", _construct_js_scalar)
 
 
 def _validate_dsh_patch(content: str) -> None:
-    yaml.load(content, Loader=_DshLoader)  # noqa: S506 - safe loader with one scalar tag
+    # _DshLoader subclasses SafeLoader and only adds one scalar tag.
+    yaml.load(content, Loader=_DshLoader)  # noqa: S506  # nosec B506
 
 
 def _atomic_write_text(path: Path, content: str) -> None:

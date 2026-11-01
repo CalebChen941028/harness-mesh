@@ -1,4 +1,4 @@
-"""Audit WP7: shared memory limits, author verification and delimiter escaping."""
+"""Shared memory limits, author verification and delimiter escaping."""
 
 from __future__ import annotations
 

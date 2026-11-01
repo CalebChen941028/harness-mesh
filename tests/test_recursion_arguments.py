@@ -1,4 +1,4 @@
-"""Audit WP4: inherited recursion state cannot be reset by tool arguments."""
+"""Inherited recursion state cannot be reset by tool arguments."""
 
 from __future__ import annotations
 

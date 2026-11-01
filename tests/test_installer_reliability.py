@@ -1,4 +1,4 @@
-"""Audit WP8: installer reliability, confirmation and doctor checks."""
+"""Installer reliability, confirmation and doctor checks."""
 
 from __future__ import annotations
 

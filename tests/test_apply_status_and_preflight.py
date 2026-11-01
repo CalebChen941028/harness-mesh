@@ -1,4 +1,4 @@
-"""Audit WP9: apply status, patch preflight and interface consistency."""
+"""Apply status, patch preflight and interface consistency."""
 
 from __future__ import annotations
 
@@ -104,6 +104,9 @@ def test_docstring_and_dependency_bounds_and_ci_units():
         name = dependency.split(">=", 1)[0].split("<", 1)[0].split("=", 1)[0]
         if name in bounds:
             assert bounds[name] in dependency, dependency
-    assert Path(".github/dependabot.yml").exists()
-    assert "pip-audit" in Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-    assert harness_mesh.__version__ == "0.4.0"
+    # The source distribution does not ship .github, so only check it in a checkout.
+    if Path(".github").exists():
+        assert Path(".github/dependabot.yml").exists()
+        assert "pip-audit" in Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    # The package and the project metadata must agree; do not pin a literal version here.
+    assert harness_mesh.__version__ == project["version"]

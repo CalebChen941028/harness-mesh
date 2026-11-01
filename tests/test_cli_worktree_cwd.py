@@ -1,4 +1,4 @@
-"""Round 5 WP-R15: the CLI must recover the primary workspace from a worktree.
+"""The CLI must recover the primary workspace from a worktree.
 
 A worker shell normally runs with its cwd set to
 ``<project>/.harness-mesh/worktrees/<task_id>``.  If the CLI treats that
@@ -29,7 +29,7 @@ HARNESSES = ("claude_code", "codex", "deepseek", "antigravity", "zcode")
 
 
 def _write_config(tmp_path: Path, *, codex_enabled: bool = False) -> Path:
-    path = tmp_path / "round5-harnesses.yaml"
+    path = tmp_path / "worktree-cwd-harnesses.yaml"
     codex = (
         "  codex:\n"
         "    enabled: true\n"
@@ -48,7 +48,7 @@ def _write_config(tmp_path: Path, *, codex_enabled: bool = False) -> Path:
 
 def _mesh_with_git_repo(tmp_path: Path):
     workspace = tmp_path / "workspace"
-    init_git_repo(workspace, {"README.md": "round 5 worktree cwd\n"})
+    init_git_repo(workspace, {"README.md": "worktree cwd\n"})
     return make_mesh(tmp_path)
 
 
@@ -278,7 +278,7 @@ def test_cli_status_in_a_worktree_reads_primary_quota_state(tmp_path):
         mesh.guardian.record_exhaustion(
             "codex",
             "*",
-            "round5_status_probe",
+            "worktree_cwd_status_probe",
             is_account_wide=True,
             cooldown_seconds=3600,
         )

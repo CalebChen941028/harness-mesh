@@ -1,4 +1,4 @@
-"""Round 3 WP-R10: the active-assignment cap is shared through state.db.
+"""The active-assignment cap is shared through state.db.
 
 Each worker harness starts its own MCP server process, so a per-router counter
 always began at zero and the global cap never held across a recursion chain.
