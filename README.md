@@ -83,6 +83,7 @@ Useful options:
 ```bash
 hmesh install --dry-run                 # print planned commands/files, change nothing
 hmesh install --yes                     # non-interactive install
+hmesh install --approve read            # pre-approve 7 read-only MCP tools
 hmesh install --harness zcode           # one harness only (repeatable)
 hmesh install --workspace /path/project # pin the MCP workspace explicitly
 hmesh install --uninstall               # remove integrations
@@ -90,7 +91,29 @@ hmesh install --uninstall               # remove integrations
 
 Without `--dry-run`, `hmesh install` prints the planned files and commands and asks for confirmation. A non-interactive shell must pass `--yes`.
 
-Headless runs cannot answer approval prompts. Verified on the real harnesses (2026-11-01): `codex exec` denies the MCP call with "approval policy is never" unless the server is approved with `-c 'mcp_servers.harness-mesh.default_tools_approval_mode="approve"'`; `agy -p` auto-denies it unless `permissions.allow` holds a matching rule such as `mcp(harness-mesh/list_harnesses)`. ZCode and DeepSeek Harness workers call the tools without extra configuration, and Claude Code shows the server as connected. Interactive sessions prompt as usual.
+### MCP tool pre-approvals
+
+Interactive sessions ask before an MCP tool runs. Headless commands such as `codex exec` and `agy -p` cannot answer that prompt, so `hmesh install` writes per-tool allow rules:
+
+```bash
+hmesh install --approve dispatch   # default: 10 read and dispatch tools
+hmesh install --approve read       # 7 read-only tools
+hmesh install --approve all        # all 13 tools
+hmesh install --approve none       # write nothing and remove rules written by hmesh
+```
+
+`dispatch`, the default, approves the seven read tools plus `dispatch_task`, `parallel_dispatch` and `cancel_task`. Dispatched work runs in an isolated worktree; its changes reach the primary checkout only through `apply_task_patch`. The three write tools stay manual: `apply_task_patch`, `report_quota_status` and `update_project_context` change the primary workspace or shared state. Pass `--approve all` to pre-approve them too.
+
+| Harness | File | Rule |
+| :--- | :--- | :--- |
+| Claude Code | `~/.claude/settings.json` | `permissions.allow` gains `mcp__harness-mesh__<tool>` |
+| Codex | `~/.codex/config.toml` | A managed block holds `[mcp_servers.harness-mesh.tools.<tool>]` with `approval_mode = "approve"` |
+| Antigravity | `~/.gemini/config/config.json` | `userSettings.globalPermissionGrants.allow` gains `mcp(harness-mesh/<tool>)` |
+| ZCode, DeepSeek Harness | none | Workers call MCP tools without approval settings |
+
+The installer is idempotent. It keeps a `<file>.harness-mesh.bak` copy before the first edit, writes through a temporary file, re-parses the result and restores the previous bytes if validation fails. Lowering the level or uninstalling removes only entries with the `mcp__harness-mesh__` or `mcp(harness-mesh/` prefix, plus the Codex managed block; other rules stay in place. `--dry-run` prints the approval count and each entry without touching files. `hmesh doctor` reports approved and missing tools against the default `dispatch` level and changes no files; on Codex, a service-wide `default_tools_approval_mode = "approve"` counts as covering every tool.
+
+Headless runs cannot answer approval prompts. Measured on the real harnesses (2026-11-01): `codex exec` denies the MCP call with "approval policy is never" unless the server is approved; `agy -p` auto-denies it unless `permissions.allow` holds a matching rule such as `mcp(harness-mesh/list_harnesses)`. The per-tool rules above cover the selected level; the service-wide Codex setting `-c 'mcp_servers.harness-mesh.default_tools_approval_mode="approve"'` remains a manual alternative that approves every tool. ZCode and DeepSeek Harness workers call the tools without extra configuration, and Claude Code shows the server as connected. Interactive sessions prompt as usual.
 
 ZCode's `--scope project` still records the marketplace and plugin in the global state files `~/.zcode/cli/plugins/known_marketplaces.json` and `installed_plugins.json`, even though the plugin and its cache are project-scoped. `hmesh install --uninstall` removes both entries; the matching `zcode plugins uninstall` and `zcode plugins marketplace remove` commands do the same by hand.
 
@@ -218,7 +241,7 @@ These blocks are project data, not instructions that override the ticket objecti
 ## CLI
 
 ```text
-hmesh install [--dry-run] [--yes] [--harness H]... [--uninstall]
+hmesh install [--dry-run] [--yes] [--approve LEVEL] [--harness H]... [--uninstall]
 hmesh doctor [--harness H] [--json]
 hmesh status [--refresh] [--json]
 hmesh models [--refresh] [--harness H]

@@ -44,6 +44,7 @@ For a large behavioural change, open an issue or design note first so routing an
 - All output returned to a controller must stay bounded. Store full diffs/transcripts as resources and expose them through `read_task_resource`.
 - Never write credentials into SQLite, logs, prompts, or generated config files.
 - Treat failover, cancellation, and timeout paths as first-class: child processes must be killed and worktrees must remain inspectable.
+- Installer edits stay scoped: use the managed `mcp__harness-mesh__` / `mcp(harness-mesh/` prefixes or the Codex marker block, back up before the first write, write through a temporary file, validate by re-parsing, and restore the previous content on failure. Cover fresh install, unrelated existing settings, idempotency, level changes, `none`/uninstall cleanup, validation failure and `--dry-run` with a temporary `HOME`.
 - Add or update tests for the behaviour you change. Real-CLI tests belong in `tests/test_local_machine_harnesses.py` or `tests/test_real_machine_mcp_env.py`, must stay behind `HARNESS_MESH_REAL_MACHINE=1`, and must skip on unsupported hosts.
 
 ## Tests and review
