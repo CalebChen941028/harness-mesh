@@ -1,4 +1,4 @@
-"""Round 2 WP-R4: worktree lineage fallback and active assignment limit."""
+"""Worktree lineage fallback and active assignment limit."""
 
 from __future__ import annotations
 

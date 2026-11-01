@@ -1,4 +1,4 @@
-"""Round 2 WP-R3: Git metadata tampering survives resume and aborts assignments."""
+"""Git metadata tampering survives resume and aborts assignments."""
 
 from __future__ import annotations
 

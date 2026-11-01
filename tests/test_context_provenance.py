@@ -1,4 +1,4 @@
-"""Round 2 WP-R8: context source provenance, migration and delimiter escaping."""
+"""Context source provenance, migration and delimiter escaping."""
 
 from __future__ import annotations
 

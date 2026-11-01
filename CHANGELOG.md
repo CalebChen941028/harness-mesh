@@ -1,10 +1,26 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 — 2026-11-01
+
+Pre-release audit of the public repository. No runtime behaviour changes.
 
 ### Documentation
 
 - Both READMEs explain that a harness's controller login and worker login differ. Measured with the Claude Code desktop app: it works as a controller while the bundled `claude` command stays logged out, so a worker needs `claude auth login` or `ANTHROPIC_API_KEY`; without it the circuit opens with `not_logged_in` and tickets move to another harness.
+- `tests/fixtures/README.md` records the source and terms of every fixture, including the Epoch AI CC BY 4.0 attribution.
+- `hmesh version` is listed with the other commands.
+
+### Packaging and CI
+
+- `pyproject.toml` declares the licence as the SPDX expression `MIT` with `license-files`, removing two setuptools deprecation warnings that become errors in 2027; the build backend now requires setuptools 77 or newer.
+- Python 3.14 is declared and added to the CI matrix.
+- Bandit reports no medium or high findings: column-name interpolation is restructured behind its allow-list and the DSH patch loader is annotated as a `SafeLoader` subclass.
+- The source distribution now ships every test fixture (`*.json`, `*.csv`, `*.txt`, `*.md`), so its test suite runs from the archive.
+
+### Repository
+
+- Test modules are named after what they cover; internal work-package labels are gone from file names and docstrings.
+- GitHub private vulnerability reporting, which `SECURITY.md` points to, is enabled.
 
 ## 0.4.0 — 2026-11-01
 

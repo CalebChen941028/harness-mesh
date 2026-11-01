@@ -1,4 +1,4 @@
-"""Audit WP2/WP3: sensitive files and symlinks in repository/worktree handling."""
+"""Sensitive files and symlinks in repository and worktree handling."""
 
 from __future__ import annotations
 

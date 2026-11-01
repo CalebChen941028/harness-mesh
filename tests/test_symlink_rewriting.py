@@ -1,4 +1,4 @@
-"""Round 2 WP-R2: symlinks must stay inside the worktree after rewriting."""
+"""Symlinks must stay inside the worktree after rewriting."""
 
 from __future__ import annotations
 

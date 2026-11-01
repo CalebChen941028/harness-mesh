@@ -1,4 +1,4 @@
-"""Audit WP1: workspace root allowlist, startup guard and sensitive previews."""
+"""Workspace root allowlist, startup guard and sensitive previews."""
 
 from __future__ import annotations
 

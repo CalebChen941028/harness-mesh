@@ -1,4 +1,4 @@
-"""Audit WP6: Mesh Git commands disable hooks and detect metadata tampering."""
+"""Mesh Git commands disable hooks and detect metadata tampering."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Round 4 WP-R13: the CLI must apply the same recursion guard as MCP.
+"""The CLI must apply the same recursion guard as MCP.
 
 A worker can run ``hmesh dispatch`` from its own shell.  Codex does not forward
 ``HARNESS_MESH_*`` to children, and every harness can pass ``--call-depth 0``,

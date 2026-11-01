@@ -6,4 +6,4 @@ include SECURITY.md
 include CONTRIBUTING.md
 include CODE_OF_CONDUCT.md
 recursive-include config *.yaml
-recursive-include tests *.py
+recursive-include tests *.py *.json *.csv *.txt *.md

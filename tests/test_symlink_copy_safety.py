@@ -1,4 +1,4 @@
-"""Audit WP3: safe symlink handling during dirty sync and patch copying."""
+"""Safe symlink handling during dirty sync and patch copying."""
 
 from __future__ import annotations
 

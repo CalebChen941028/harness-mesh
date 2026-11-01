@@ -659,7 +659,9 @@ class StateStore:
         params.append(time.time())
         params.append(task_id)
         with self._lock:
-            self._conn.execute(f"UPDATE tasks SET {', '.join(updates)} WHERE task_id=?", tuple(params))
+            # Column names come from the allow-list above; values are bound parameters.
+            statement = f"UPDATE tasks SET {', '.join(updates)} WHERE task_id=?"  # nosec B608
+            self._conn.execute(statement, tuple(params))
             self._conn.commit()
 
     def set_task_result(self, task_id: str, result: TaskResult) -> None:
@@ -809,7 +811,9 @@ class StateStore:
             return
         params.append(assignment_id)
         with self._lock:
-            self._conn.execute(f"UPDATE assignments SET {', '.join(updates)} WHERE assignment_id=?", tuple(params))
+            # Column names come from the allow-list above; values are bound parameters.
+            statement = f"UPDATE assignments SET {', '.join(updates)} WHERE assignment_id=?"  # nosec B608
+            self._conn.execute(statement, tuple(params))
             self._conn.commit()
 
     @staticmethod
