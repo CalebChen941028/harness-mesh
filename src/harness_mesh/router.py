@@ -2166,8 +2166,8 @@ def create_mesh_runtime(
     config: MeshConfig | None = None,
 ) -> MeshRuntime:
     root = Path(workspace_root or Path.cwd()).expanduser().resolve()
-    root = ensure_service_workspace(root)
     cfg = config or load_config(config_path, root)
+    root = ensure_service_workspace(root, auto_init_repo=cfg.auto_init_repo)
     if not cfg.allowed_workspace_roots:
         cfg.allowed_workspace_roots = [str(root)]
     home_dir = (env or {}).get("HOME") or (env or {}).get("USERPROFILE")

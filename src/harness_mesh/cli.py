@@ -20,6 +20,7 @@ from .models import (
     WorkspaceMode,
 )
 from .router import create_mesh_runtime
+from .security import ensure_service_workspace
 
 app = typer.Typer(
     add_completion=False,
@@ -88,6 +89,11 @@ def install(
     workspace = options.get("workspace") or os.getcwd()
     config_path = options.get("config")
     config = load_config(config_path, workspace)
+    try:
+        ensure_service_workspace(workspace, auto_init_repo=config.auto_init_repo)
+    except RuntimeError as exc:
+        typer.echo(f"Cannot install from this workspace: {exc}", err=True)
+        raise typer.Exit(code=1)
 
     def build(dry: bool):
         return HarnessInstaller(
@@ -147,6 +153,18 @@ def doctor(
         config_path=config_path or find_config_path(workspace),
     )
     results = installer.doctor(harness)
+    for result in results:
+        registration = installer._read_registration(result.harness)
+        if registration is None:
+            continue
+        registered_workspace = (registration.get("env") or {}).get("HARNESS_MESH_WORKSPACE")
+        if not registered_workspace:
+            continue
+        try:
+            ensure_service_workspace(registered_workspace, auto_init_repo=config.auto_init_repo)
+        except RuntimeError as exc:
+            result.status = "failed"
+            result.detail = f"registered workspace is invalid: {exc}"
     if json_output:
         typer.echo(_json([result.as_dict() for result in results]))
     else:

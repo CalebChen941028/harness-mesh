@@ -106,16 +106,21 @@ def is_git_workspace(root: str | Path) -> bool:
     target = Path(root).expanduser().resolve()
     if not target.is_dir():
         return False
-    result = subprocess.run(
-        ["git", "-C", str(target), "rev-parse", "--show-toplevel"],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(target), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("git is not installed or not on PATH; install Git first") from exc
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"cannot inspect Git workspace {target}: {exc}") from exc
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
-def ensure_service_workspace(root: str | Path) -> Path:
+def ensure_service_workspace(root: str | Path, *, auto_init_repo: bool = False) -> Path:
     """Reject unsafe MCP/CLI startup workspaces.
 
     The service must run inside a Git repository and never from the home
@@ -130,10 +135,13 @@ def ensure_service_workspace(root: str | Path) -> Path:
             "harness-mesh refuses to run from the filesystem root or your home directory; "
             "set HARNESS_MESH_WORKSPACE to a project directory"
         )
+    if auto_init_repo:
+        return target
     if not is_git_workspace(target):
         raise RuntimeError(
             f"harness-mesh requires a Git workspace (got {target}); "
-            "set HARNESS_MESH_WORKSPACE to a Git project or run `git init` first"
+            "set HARNESS_MESH_WORKSPACE to a Git project, run `git init`, "
+            "or enable auto_init_repo"
         )
     return target
 
