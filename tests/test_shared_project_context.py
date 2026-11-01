@@ -196,7 +196,7 @@ def test_cli_context_set_and_list(tmp_path):
     home = tmp_path / "home"
     workspace = tmp_path / "workspace"
     home.mkdir()
-    workspace.mkdir()
+    init_git_repo(workspace, {"README.md": "context CLI fixture\n"})
     config_path = Path(__file__).resolve().parents[1] / "config" / "harnesses.example.yaml"
     env = {
         "HOME": str(home),

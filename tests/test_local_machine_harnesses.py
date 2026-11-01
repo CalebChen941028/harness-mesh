@@ -46,7 +46,9 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.mark.asyncio
 async def test_real_status_and_full_model_inventory(tmp_path):
-    runtime = create_mesh_runtime(config=default_config(), workspace_root=tmp_path / "workspace")
+    workspace = tmp_path / "workspace"
+    init_git_repo(workspace, {"README.md": "real-machine status fixture\n"})
+    runtime = create_mesh_runtime(config=default_config(), workspace_root=workspace)
     try:
         statuses = await runtime.router.list_harnesses(refresh_models=True)
         by_name = {status.harness: status for status in statuses}

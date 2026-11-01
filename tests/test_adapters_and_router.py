@@ -31,7 +31,7 @@ from harness_mesh.mcp_server import TOOL_NAMES, create_server
 from harness_mesh.models import TaskRequest, TaskStatus, WorkspaceMode
 from harness_mesh.storage import ResourceNotFoundError
 from harness_mesh.workspace import WorkspaceError
-from tests.helpers import FakeAdapter, make_mesh, success, write_claude_settings, write_codex_config
+from tests.helpers import FakeAdapter, init_git_repo, make_mesh, success, write_claude_settings, write_codex_config
 
 
 def test_command_renderer_drops_empty_flag_value_pairs():
@@ -1056,10 +1056,13 @@ async def test_parallel_dispatch_runs_independent_harnesses(tmp_path):
             "claude_code": FakeAdapter("claude_code", claude_handler),
             "codex": FakeAdapter("codex", codex_handler),
         },
+        config_updates={"allowed_workspace_roots": [str(tmp_path)]},
     )
     try:
         write_claude_settings(mesh.home_dir, model="claude-opus-9")
         write_codex_config(mesh.home_dir, model="gpt-5-codex")
+        init_git_repo(tmp_path / "ws_claude", {"README.md": "claude workspace\n"})
+        init_git_repo(tmp_path / "ws_codex", {"README.md": "codex workspace\n"})
 
         requests = [
             TaskRequest(
@@ -1277,6 +1280,7 @@ def test_cli_status_models_quota_and_skills_commands(tmp_path):
     home = tmp_path / "home"
     workspace = tmp_path / "workspace"
     write_claude_settings(home, model="claude-opus-9")
+    init_git_repo(workspace, {"README.md": "cli fixture\n"})
     config_path = Path(__file__).resolve().parents[1] / "config" / "harnesses.example.yaml"
     env = {
         "HOME": str(home),

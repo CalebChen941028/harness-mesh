@@ -35,6 +35,7 @@ from .models import (
     utc_now,
 )
 from .quota import QuotaErrorDetector, QuotaGuardian, QuotaRecoveryMonitor
+from .security import WorkspaceRootError, ensure_service_workspace, resolve_allowed_root
 from .skills import SkillPluginManager
 from .storage import StateStore, TaskNotFoundError
 from .workspace import Changes, WorkspaceError, WorkspaceManager
@@ -92,6 +93,8 @@ class MeshRouter:
         self.config = config
         self.storage = storage
         self.workspace_root = Path(workspace_root or Path.cwd()).expanduser().resolve()
+        if not self.config.allowed_workspace_roots:
+            self.config.allowed_workspace_roots = [str(self.workspace_root)]
         self.env = dict(env) if env is not None else None
         self.home_dir = home_dir
         self.now_fn = now_fn or time.monotonic
@@ -207,7 +210,13 @@ class MeshRouter:
                 request, f"unknown target_harness '{target}' (known: {list(self.config.harnesses)})", started
             )
 
-        root = Path(request.workspace_root or self.workspace_root).expanduser().resolve()
+        try:
+            root = resolve_allowed_root(
+                request.workspace_root or self.workspace_root,
+                self.config.allowed_workspace_roots,
+            )
+        except WorkspaceRootError as exc:
+            return self._rejected_result(request, str(exc), started)
         try:
             root.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -2007,7 +2016,13 @@ class MeshRouter:
             raise WorkspaceError(
                 f"task {task_id} was executed in read_only mode; its disposable worktree is not applied"
             )
-        root = Path(request.workspace_root if request else self.workspace_root).expanduser().resolve()
+        try:
+            root = resolve_allowed_root(
+                request.workspace_root if request else self.workspace_root,
+                self.config.allowed_workspace_roots,
+            )
+        except WorkspaceRootError as exc:
+            raise WorkspaceError(str(exc)) from exc
         ws = self._workspace_for(root)
         apply_result = ws.apply_worktree_changes(task_id, workspace_root=root, strategy=strategy)
         return apply_result.as_dict()
@@ -2084,8 +2099,10 @@ def create_mesh_runtime(
     config: MeshConfig | None = None,
 ) -> MeshRuntime:
     root = Path(workspace_root or Path.cwd()).expanduser().resolve()
-    root.mkdir(parents=True, exist_ok=True)
+    root = ensure_service_workspace(root)
     cfg = config or load_config(config_path, root)
+    if not cfg.allowed_workspace_roots:
+        cfg.allowed_workspace_roots = [str(root)]
     home_dir = (env or {}).get("HOME") or (env or {}).get("USERPROFILE")
     state_dir = cfg.state_path(root)
     storage = StateStore(state_dir / "state.db")

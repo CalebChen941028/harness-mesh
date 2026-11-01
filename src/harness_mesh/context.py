@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from .security import is_sensitive_path
 from .storage import StateStore
 
 PROJECT_INSTRUCTION_FILES = (
@@ -180,7 +181,7 @@ class ProjectContextManager:
                 resolved.relative_to(root)
             except (OSError, ValueError):
                 continue
-            if not resolved.is_file():
+            if not resolved.is_file() or is_sensitive_path(resolved):
                 continue
             try:
                 text = resolved.read_text(encoding="utf-8", errors="replace")
