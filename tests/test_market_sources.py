@@ -451,6 +451,7 @@ async def test_cache_hits_ttl_and_force_refresh():
     service = MarketService(
         _store(),
         config=MarketConfig(sources=["openrouter"], ttl_seconds=3600),
+        env={},
         providers={"openrouter": provider},
         now_fn=lambda: clock["now"],
     )
@@ -475,6 +476,7 @@ async def test_failed_fetch_falls_back_to_stale_cache():
     service = MarketService(
         _store(),
         config=MarketConfig(sources=["openrouter"], ttl_seconds=60),
+        env={},
         providers={"openrouter": provider},
         now_fn=lambda: clock["now"],
     )
@@ -499,6 +501,7 @@ async def test_cache_older_than_seven_days_is_expired_but_still_usable():
     service = MarketService(
         _store(),
         config=MarketConfig(sources=["openrouter"], ttl_seconds=60),
+        env={},
         providers={"openrouter": provider},
         now_fn=lambda: clock["now"],
     )

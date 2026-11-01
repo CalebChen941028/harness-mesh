@@ -19,6 +19,11 @@ def block_network_by_default(monkeypatch):
         yield
         return
 
+    # Child processes do not inherit the in-process socket guard below.  The
+    # offline switch is inherited, so a CLI or MCP subprocess returns cached
+    # market data instead of downloading a catalogue.
+    monkeypatch.setenv("HARNESS_MESH_OFFLINE", "1")
+
     def blocked(*args, **kwargs):
         raise AssertionError(
             "network access is forbidden in the default test suite; "

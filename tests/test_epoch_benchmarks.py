@@ -373,6 +373,7 @@ async def test_epoch_refresh_caches_scores_and_falls_back_when_stale(tmp_path):
         service = MarketService(
             store,
             config=config,
+            env={},
             providers={"epoch": EpochProvider(config=config.epoch, transport=transport)},
             now_fn=lambda: clock["now"],
         )

@@ -259,7 +259,13 @@ async def test_stdio_server_derives_the_same_lineage_as_the_environment(tmp_path
             sibling.terminate()
             raise
 
-        env = {key: value for key, value in os.environ.items() if not key.startswith("HARNESS_MESH_")}
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            # Keep the suite's offline switch; the stdio server cannot inherit
+            # the in-process socket guard, and lineage variables stay dropped.
+            if not key.startswith("HARNESS_MESH_") or key == "HARNESS_MESH_OFFLINE"
+        }
         env["PYTHONPATH"] = str(REPO_ROOT / "src")
         env["HOME"] = str(mesh.home_dir)
         # Belt and braces: even a regression in lineage resolution must fail

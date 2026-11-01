@@ -73,7 +73,13 @@ def _add_running_assignment(mesh, task_id: str = "worktree-parent") -> Assignmen
 
 
 def _env(mesh) -> dict[str, str]:
-    env = {key: value for key, value in os.environ.items() if not key.startswith("HARNESS_MESH_")}
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        # Keep the suite's offline switch; children cannot inherit the socket
+        # guard, and every other HARNESS_MESH_* variable is dropped on purpose.
+        if not key.startswith("HARNESS_MESH_") or key == "HARNESS_MESH_OFFLINE"
+    }
     env["PYTHONPATH"] = str(REPO_ROOT / "src")
     env["HOME"] = str(mesh.home_dir)
     env["HARNESS_MESH_DISABLE_SYSTEM_BINARIES"] = "1"
