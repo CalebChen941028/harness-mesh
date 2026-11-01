@@ -1,14 +1,12 @@
 """Real-machine integration tests for the five locally installed harnesses.
 
-These tests intentionally call the real CLIs and are skipped on machines where
-the expected macOS application bundles are absent.
+These tests call the real CLIs and consume provider quota.  They only run when
+``HARNESS_MESH_REAL_MACHINE=1`` is set on a machine with all five installations;
+``pytest -q`` alone never touches a real harness.
 """
 
 from __future__ import annotations
 
-import glob
-import os
-import sys
 from pathlib import Path
 
 import pytest
@@ -17,30 +15,11 @@ from harness_mesh.config import default_config
 from harness_mesh.models import TaskRequest, TaskStatus
 from harness_mesh.router import create_mesh_runtime
 from tests.helpers import init_git_repo
-
-REAL_PATHS = {
-    "claude_code": "~/Library/Application Support/Claude/claude-code/*/*/claude.app/Contents/MacOS/claude",
-    "codex": "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
-    "deepseek": "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh",
-    "antigravity": "/Applications/Gemini.app/Contents/Helpers/agy",
-    "zcode": "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
-}
-
-
-def _real_machine_available() -> bool:
-    if sys.platform != "darwin":
-        return False
-    for _, pattern in REAL_PATHS.items():
-        expanded = os.path.expanduser(pattern)
-        if glob.glob(expanded) if "*" in expanded else Path(expanded).exists():
-            continue
-        return False
-    return True
-
+from tests.real_machine import real_machine_available, real_machine_enabled, skip_reason
 
 pytestmark = pytest.mark.skipif(
-    not _real_machine_available(),
-    reason="real Claude/Codex/DSH/Antigravity/ZCode installations not found",
+    not real_machine_enabled() or not real_machine_available(),
+    reason=skip_reason(),
 )
 
 

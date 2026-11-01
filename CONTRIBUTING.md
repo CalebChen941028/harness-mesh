@@ -13,6 +13,18 @@ python3 -m venv .venv
 
 Python 3.11+ is required. macOS is the primary test platform because the real harness integration suite exercises locally installed desktop applications. Linux and WSL work with CLI binaries available on `PATH`; real-machine tests skip when the macOS bundles are absent.
 
+## Real-machine tests
+
+`pytest -q` never launches a vendor CLI. The real-machine suites are opt-in and consume provider quota (one short prompt per harness):
+
+```bash
+HARNESS_MESH_REAL_MACHINE=1 .venv/bin/pytest -q tests/test_local_machine_harnesses.py tests/test_real_machine_mcp_env.py
+```
+
+Without the variable both files are skipped, so a developer laptop and CI produce the same default run. The MCP environment probe expects Claude Code, Codex, DeepSeek Harness, Antigravity and ZCode to be installed; missing bundles skip the suite.
+
+Tests that write a harness' global configuration additionally require `HARNESS_MESH_REAL_MACHINE_GLOBAL=1`. That covers ZCode (plugin marketplace entries in `~/.zcode/cli/plugins/`) and Antigravity (`~/.gemini/config/mcp_config.json`). These tests restore the previous state in a `finally` block and fail if the restore fails; only enable the switch on a machine whose harness configuration you own.
+
 ## What to contribute
 
 Useful contributions include:
@@ -32,7 +44,7 @@ For a large behavioural change, open an issue or design note first so routing an
 - All output returned to a controller must stay bounded. Store full diffs/transcripts as resources and expose them through `read_task_resource`.
 - Never write credentials into SQLite, logs, prompts, or generated config files.
 - Treat failover, cancellation, and timeout paths as first-class: child processes must be killed and worktrees must remain inspectable.
-- Add or update tests for the behaviour you change. Real-CLI tests belong in `tests/test_local_machine_harnesses.py` and must skip on unsupported hosts.
+- Add or update tests for the behaviour you change. Real-CLI tests belong in `tests/test_local_machine_harnesses.py` or `tests/test_real_machine_mcp_env.py`, must stay behind `HARNESS_MESH_REAL_MACHINE=1`, and must skip on unsupported hosts.
 
 ## Tests and review
 
