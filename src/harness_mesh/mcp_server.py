@@ -66,6 +66,29 @@ def _env_trace_chain(name: str = "HARNESS_MESH_TRACE_CHAIN") -> list[str] | None
     return None
 
 
+def _effective_call_depth(argument: int | None) -> int:
+    inherited = _env_int("HARNESS_MESH_CALL_DEPTH") or 0
+    if argument is None:
+        return inherited
+    try:
+        requested = int(argument)
+    except (TypeError, ValueError):
+        requested = 0
+    return max(inherited, requested)
+
+
+def _merge_trace_chain(argument: list[str] | None) -> list[str]:
+    inherited = _env_trace_chain() or []
+    if not argument:
+        return list(inherited)
+    merged = list(inherited)
+    for item in argument:
+        name = str(item)
+        if name not in merged:
+            merged.append(name)
+    return merged
+
+
 def get_runtime() -> MeshRuntime:
     global _runtime
     if _runtime is None:
@@ -171,12 +194,8 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
             "workspace_root": workspace_root or str(router.workspace_root),
             "timeout_seconds": timeout_seconds,
             "session_id": session_id,
-            "call_depth": call_depth if call_depth is not None else (_env_int("HARNESS_MESH_CALL_DEPTH") or 0),
-            "trace_chain": (
-                list(trace_chain)
-                if trace_chain is not None
-                else (_env_trace_chain() or [])
-            ),
+            "call_depth": _effective_call_depth(call_depth),
+            "trace_chain": _merge_trace_chain(trace_chain),
             "checkpoint": ContinuationCheckpoint.model_validate(checkpoint) if checkpoint else None,
         }
         if max_failover_attempts is not None:
@@ -196,16 +215,13 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
     ) -> dict[str, Any]:
         """Dispatch multiple tickets concurrently across different harnesses."""
 
-        inherited_depth = _env_int("HARNESS_MESH_CALL_DEPTH")
-        inherited_trace = _env_trace_chain()
         parent_task_id = os.environ.get("HARNESS_MESH_TASK_ID")
         normalized: list[dict[str, Any]] = []
         for task in tasks:
             item = dict(task)
-            if "call_depth" not in item and inherited_depth is not None:
-                item["call_depth"] = inherited_depth
-            if "trace_chain" not in item and inherited_trace is not None:
-                item["trace_chain"] = inherited_trace
+            item.setdefault("workspace_root", str(router.workspace_root))
+            item["call_depth"] = _effective_call_depth(item.get("call_depth"))
+            item["trace_chain"] = _merge_trace_chain(item.get("trace_chain"))
             if "parent_task_id" not in item and parent_task_id:
                 item["parent_task_id"] = parent_task_id
             normalized.append(item)
