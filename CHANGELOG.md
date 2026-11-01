@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.1 — 2026-11-01
+
+Security hardening release addressing the independent audit.
+
+### Added
+
+- `allowed_workspace_roots` config, symlink-resolved containment checks for dispatch/apply, and refusal to start the MCP/CLI service from `$HOME`, `/`, or a non-Git directory.
+- Sensitive-file exclusion in `.git/info/exclude` and in dirty-sync/copy paths; `auto_init_repo` now defaults to false.
+- `auto_approve_shared_write` config, default false; `shared_write` no longer inherits approval bypass implicitly.
+- `hmesh doctor` checks registered command paths and `python -m harness_mesh.mcp_server --help`.
+- `hmesh install --yes` for non-interactive use; without it, a non-interactive install is refused after printing the plan.
+- Dependabot configuration for pip and GitHub Actions, plus a non-blocking `pip-audit` CI step.
+
+### Changed
+
+- Workspace roots are validated before any directory creation; active task state is rejected when the root escapes the allowlist.
+- Baselines and worktrees skip `.env`, key material, credential files and similar names; untracked symlinks are recreated only when their target stays inside the workspace.
+- MCP call depth uses `max(argument, inherited)` and trace chains are merged, so a worker cannot reset recursion state.
+- DeepSeek Harness uses `workspace-write` when `auto_approve` is false; built-in shell commands drop credential-shaped environment variables.
+- Mesh Git commands disable repository hooks; `.git/config` and `.git/hooks` hashes are compared before apply.
+- Shared memory keys and content are capped, authors must be configured harness names or `controller`, delimiters are escaped, and auto-recorded summaries move to a separate unverified block.
+- MCP `apply_task_patch` supports only `patch` and `merge`; CLI copy requires `--force-copy`. Apply requires a completed ticket and runs a patch preflight.
+- Installer subprocesses use `stdin=DEVNULL`, restore the previous registration when add fails, write DSH patches atomically with rollback, and use a consistent Claude `user` scope.
+- Dependency upper bounds added for pydantic, PyYAML, httpx and Typer; MCP module documentation corrected.
+
 ## 0.3.0 — 2026-11-01
 
 ### Added
