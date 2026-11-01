@@ -25,6 +25,8 @@ def test_read_level_lists_only_read_tools():
         "read_task_resource",
         "get_quota_status",
         "get_project_context",
+        "get_integration_status",
+        "plan_integration",
     ]
 
 

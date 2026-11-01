@@ -1,4 +1,4 @@
-"""FastMCP server exposing the fifteen cross-harness orchestration tools."""
+"""FastMCP server exposing the eighteen cross-harness orchestration tools."""
 
 from __future__ import annotations
 
@@ -12,7 +12,9 @@ try:  # MCP v1 (the pinned API)
 except ImportError:  # pragma: no cover - MCP v2 renamed FastMCP to MCPServer
     from mcp.server.mcpserver import MCPServer as FastMCP  # type: ignore
 
-from .config import load_config
+from .approvals import DEFAULT_APPROVAL_LEVEL
+from .config import find_config_path, load_config
+from .installer import HarnessInstaller
 from .lineage import (
     _effective_call_depth,
     _inherited_lineage,
@@ -49,6 +51,9 @@ TOOL_NAMES = [
     "cancel_task",
     "get_project_context",
     "update_project_context",
+    "get_integration_status",
+    "plan_integration",
+    "install_integration",
 ]
 
 # Sent to every client in the MCP ``initialize`` response.  Fixed text, no
@@ -58,7 +63,15 @@ MESH_INSTRUCTIONS = (
     "Ask for an outcome. Do not pass model or target_harness: the mesh picks a "
     "model from the task kind and price/performance. Pass task_kind when you "
     "know it. Review changes with get_task_status and read_task_resource before "
-    "apply_task_patch."
+    "apply_task_patch. When integration_hints is not empty, explain the hint to "
+    "the user, call plan_integration, show the plan, and call "
+    "install_integration only after the user gives explicit consent. Never "
+    "decide for the user."
+)
+
+_integration_warning = (
+    "Workers cannot change harness integrations; only the controller may install "
+    "after the user agrees"
 )
 
 _runtime: MeshRuntime | None = None
@@ -86,6 +99,47 @@ def _error_detail(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+def _installation(
+    router: MeshRouter,
+    *,
+    approve_level: str = DEFAULT_APPROVAL_LEVEL,
+    dry_run: bool = False,
+) -> HarnessInstaller:
+    """Build an installer with the same environment the router resolved.
+
+    Tests inject ``which`` on the discovery engine; honouring it here keeps
+    integration detection inside the same temporary HOME as the rest of the
+    runtime instead of probing the developer's installed applications.
+    """
+
+    return HarnessInstaller(
+        router.config,
+        router.workspace_root,
+        home_dir=router.home_dir,
+        env=router.env,
+        which=getattr(router.discovery, "_which", None),
+        config_path=os.environ.get("HARNESS_MESH_CONFIG")
+        or find_config_path(router.workspace_root),
+        dry_run=dry_run,
+        approval_level=approve_level,
+    )
+
+
+def _integration_refusal(router: MeshRouter) -> str | None:
+    """Return why this caller may not install, or ``None`` when allowed."""
+
+    env = router.env if router.env is not None else os.environ
+    if os.environ.get("HARNESS_MESH_READ_ONLY") == "1" or env.get("HARNESS_MESH_READ_ONLY") == "1":
+        return (
+            "harness-mesh is running read-only "
+            "(HARNESS_MESH_READ_ONLY=1); installation is disabled"
+        )
+    task_id = _task_id_from_cwd(router)
+    if task_id:
+        return f"{_integration_warning} (assignment {task_id})"
+    return None
+
+
 def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
     server = FastMCP("harness-mesh", instructions=MESH_INSTRUCTIONS)
     router: MeshRouter = runtime.router if isinstance(runtime, MeshRuntime) else (runtime or get_runtime().router)
@@ -95,7 +149,18 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
         """List locally available harnesses, discovered authorised models, tier bindings and quota state."""
 
         statuses = await router.list_harnesses(refresh_models=refresh_models)
-        return {"harnesses": [status.model_dump(mode="json") for status in statuses]}
+        try:
+            hints = [
+                hint
+                for status in _installation(router).integration_status()
+                if (hint := HarnessInstaller.integration_hint(status)) is not None
+            ]
+        except Exception:
+            hints = []
+        return {
+            "harnesses": [status.model_dump(mode="json") for status in statuses],
+            "integration_hints": hints,
+        }
 
     @server.tool()
     async def discover_harness_models(
@@ -375,6 +440,63 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
             )
         except Exception as exc:
             return {"error": _error_detail(exc), "key": key}
+
+    @server.tool()
+    def get_integration_status() -> dict[str, Any]:
+        """Report whether each installed harness can reach Mesh as a controller.
+
+        States are ``integrated``, ``detected_not_integrated``, ``stale``,
+        ``not_detected`` and ``ignored``.  Read-only: detection never writes.
+        """
+
+        try:
+            statuses = _installation(router).integration_status()
+        except Exception as exc:
+            return {"harnesses": [], "error": _error_detail(exc)}
+        return {"harnesses": [status.as_dict() for status in statuses]}
+
+    @server.tool()
+    def plan_integration(
+        harness: str, approve_level: str = DEFAULT_APPROVAL_LEVEL
+    ) -> dict[str, Any]:
+        """Return the exact installation plan and ``plan_id`` without writing.
+
+        ``harness`` must be an enabled configured name and ``approve_level``
+        one of ``read``, ``dispatch``, ``all`` or ``none``.  Show this plan to
+        the user and ask for consent before calling ``install_integration``.
+        """
+
+        try:
+            installer = _installation(router, approve_level=approve_level)
+            return installer.integration_plan(harness, approve_level).as_dict()
+        except (ValueError, OSError) as exc:
+            return {"error": _error_detail(exc), "harness": harness}
+
+    @server.tool()
+    def install_integration(
+        harness: str,
+        approve_level: str = DEFAULT_APPROVAL_LEVEL,
+        plan_id: str = "",
+    ) -> dict[str, Any]:
+        """Install one harness after the user approved the reviewed plan.
+
+        This is a write tool: it refuses workers and ``HARNESS_MESH_READ_ONLY=1``,
+        and it refuses any ``plan_id`` that no longer matches a freshly computed
+        plan.  The target harness must restart before the tools appear.
+        """
+
+        refusal = _integration_refusal(router)
+        if refusal is not None:
+            return {"harness": harness, "installed": False, "error": refusal}
+        try:
+            installer = _installation(router, approve_level=approve_level)
+            return installer.install_integration(harness, approve_level, plan_id)
+        except (ValueError, OSError) as exc:
+            return {
+                "harness": harness,
+                "installed": False,
+                "error": _error_detail(exc),
+            }
 
     return server
 

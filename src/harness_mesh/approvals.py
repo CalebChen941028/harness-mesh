@@ -8,8 +8,6 @@ state and stay manual unless the user explicitly asks for ``all``.
 
 from __future__ import annotations
 
-from .mcp_server import TOOL_NAMES
-
 APPROVAL_LEVELS: tuple[str, ...] = ("read", "dispatch", "all", "none")
 DEFAULT_APPROVAL_LEVEL = "dispatch"
 
@@ -29,6 +27,9 @@ TOOL_APPROVAL_CLASSES: dict[str, str] = {
     "apply_task_patch": "write",
     "report_quota_status": "write",
     "update_project_context": "write",
+    "get_integration_status": "read",
+    "plan_integration": "read",
+    "install_integration": "write",
 }
 
 _LEVEL_CLASSES: dict[str, frozenset[str]] = {
@@ -41,6 +42,10 @@ _LEVEL_CLASSES: dict[str, frozenset[str]] = {
 
 def tools_for_level(level: str) -> list[str]:
     """Return the MCP tools approved at ``level``, in ``TOOL_NAMES`` order."""
+
+    # Imported lazily: ``mcp_server`` imports the installer, which imports
+    # this module, so a module-level import would close the cycle.
+    from .mcp_server import TOOL_NAMES
 
     classes = _LEVEL_CLASSES.get(str(level).lower())
     if classes is None:

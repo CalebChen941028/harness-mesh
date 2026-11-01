@@ -92,7 +92,7 @@ def test_docstring_and_dependency_bounds_and_ci_units():
 
     import harness_mesh.mcp_server as server_module
 
-    assert "fifteen" in (server_module.__doc__ or "").lower()
+    assert "eighteen" in (server_module.__doc__ or "").lower()
     project = tomllib.loads((Path("pyproject.toml")).read_text(encoding="utf-8"))["project"]
     bounds = {
         "pydantic": "<3",
