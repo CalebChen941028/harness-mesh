@@ -201,6 +201,29 @@ class MarketConfig(BaseModel):
     overrides: dict[str, MarketOverrideConfig] = Field(default_factory=dict)
 
 
+class RoutingPinConfig(BaseModel):
+    """A fixed ``{harness, model}`` for one task kind."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    harness: str
+    model: str
+    effort: str | None = None
+
+
+class RoutingConfig(BaseModel):
+    """Task-kind tiers, value floors and optional model preference hints."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    mode: str = "auto"
+    floors: dict[str, float] = Field(default_factory=lambda: {"low": 0.55, "medium": 0.70})
+    premium_hints: list[str] = Field(default_factory=list)
+    value_hints: list[str] = Field(default_factory=list)
+    strict_hints: bool = False
+    pins: dict[str, RoutingPinConfig] = Field(default_factory=dict)
+
+
 class MeshConfig(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
@@ -242,6 +265,7 @@ class MeshConfig(BaseModel):
     skill_roots: list[str] = Field(default_factory=list)
     plugin_roots: list[str] = Field(default_factory=list)
     market: MarketConfig = Field(default_factory=MarketConfig)
+    routing: RoutingConfig = Field(default_factory=RoutingConfig)
     harnesses: dict[str, HarnessConfig] = Field(default_factory=dict)
 
     def enabled_harnesses(self) -> list[str]:
@@ -986,7 +1010,11 @@ def config_to_json(config: MeshConfig) -> str:
 
 __all__ = [
     "HarnessConfig",
+    "MarketConfig",
+    "MarketOverrideConfig",
     "MeshConfig",
+    "RoutingConfig",
+    "RoutingPinConfig",
     "build_handoff_prompt",
     "build_initial_prompt",
     "build_recovery_note",

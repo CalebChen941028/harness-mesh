@@ -763,6 +763,14 @@ def _split_identity(model_id: str) -> tuple[str, str | None]:
     return text, effort
 
 
+def _full_market_identity(model_id: str) -> str:
+    text = _BRACKETS.sub("", _text(model_id, 300).lower()).strip()
+    text = text.split("/")[-1].replace(".", "-")
+    text = _DATE_SUFFIX_8.sub("", text)
+    text = re.sub(r"-{2,}", "-", text)
+    return text.strip("-")
+
+
 def normalize_model_identity(model_id: str) -> tuple[str, str | None]:
     """Public, pure identity normaliser used by matching tests and routing."""
 
@@ -851,7 +859,21 @@ def match_model(
     if len(untouched_targets) > 1:
         return ModelMatch(confidence="none", effort_variant=None)
 
-    # 2. normalised identity: dot/hyphen equivalence, 8-digit dates, effort
+    # 2a. dot/hyphen and date equivalence without stripping a real ``-max`` name
+    full_name = _full_market_identity(model_id)
+    full_targets = [
+        model.key
+        for model in models
+        if _normalize_name(model.key.split("/", 1)[-1]) == full_name
+        or full_name in {_normalize_name(alias) for alias in model.aliases}
+    ]
+    full_targets = list(dict.fromkeys(full_targets))
+    if len(full_targets) == 1:
+        return _match(full_targets[0], by_key, "normalized", None)
+    if len(full_targets) > 1:
+        return ModelMatch(confidence="none", effort_variant=None)
+
+    # 2b. normalised identity: dot/hyphen equivalence, 8-digit dates, effort
     normalized_name, _ = normalize_model_identity(model_id)
     if not normalized_name:
         return ModelMatch(confidence="none", effort_variant=effort)
