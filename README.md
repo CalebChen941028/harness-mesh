@@ -28,7 +28,7 @@ It is not a replacement for a harness's permission model, sandbox, or vendor ter
 | In scope | Out of scope |
 | :--- | :--- |
 | Dynamic discovery of locally authorised models from configuration, environment, live model endpoints and CLI enumeration | Maintaining a fixed or hosted model catalogue |
-| Four-tier difficulty routing (`low` → `critical`) and skill/plugin injection | Training or hosting models |
+| Difficulty tiers plus market-aware routing by task kind, and skill/plugin injection | Training or hosting models |
 | Ticket/Assignment failover on quota exhaustion, unauthorised models, credential failures and transient errors | Multi-tenant authentication, RBAC or billing |
 | Git worktree isolation, dirty-workspace sync, dependency pre-apply and explicit patch application | Merging worktrees automatically without review |
 | Shared project instructions, a cross-harness memory blackboard and dependency context | Uploading project data to a remote service |
@@ -125,11 +125,16 @@ Restart the desktop application after installation and start a new chat/task. Ex
 # Discover installed harnesses, real CLI versions and authorised models.
 hmesh status
 
-# Force the three-layer model discovery and the four-tier mapping.
+# Force the three-layer model discovery and the tier mapping.
 hmesh models --refresh
 
 # Inspect quota circuits and waiting tickets.
 hmesh quota --probe
+
+# Fetch market prices and evaluation scores, then preview a route.
+hmesh market refresh
+hmesh market show --unmatched
+hmesh route --objective "Design the migration plan" --kind plan
 
 # List indexed SKILL.md files and MCP/plugin manifests.
 hmesh skills
@@ -153,13 +158,13 @@ hmesh apply <task_id> --strategy copy --force-copy
 hmesh doctor
 ```
 
-Start the MCP server with background recovery and effects consumption (the default):
+Start the MCP server with background recovery, effects consumption and market refresh (the default):
 
 ```bash
 hmesh-mcp
 ```
 
-Disable background workers for a pure request/response server:
+Disable every background worker for a pure request/response server:
 
 ```bash
 hmesh-mcp --no-monitor
@@ -219,6 +224,56 @@ These blocks are project data, not instructions that override the ticket objecti
 ### Sessions and permissions
 
 `TaskRequest.session_id` flows through MCP and `AdapterCall`. Adapters map it to `--resume` (Claude/ZCode), `codex exec resume <id>`, `--session-id` (DSH) or `--conversation` (Antigravity). Write-mode templates inject each CLI's approval bypass; read-only tickets use plan/read-only modes and run in a disposable worktree.
+
+## Market data and model routing
+
+The mesh can rank models by published price and evaluation score instead of relying only on the four difficulty tiers. The data layer is read-only and separate from dispatch.
+
+### Sources
+
+| Source | Authentication | Fields used |
+| :--- | :--- | :--- |
+| OpenRouter `/api/v1/models` | none | list price per token, context window, reasoning and tool flags |
+| models.dev `/api.json` | none | list price per million tokens, context window, release date |
+| Artificial Analysis `/api/v2/language/models/free` | `ARTIFICIAL_ANALYSIS_API_KEY` | intelligence index, list price, output speed |
+
+OpenRouter prices win over models.dev when both know a model. Evaluation scores come from Artificial Analysis or a user override. Without a key, the mesh computes a labelled heuristic from the existing discovery score, the price percentile, the reasoning flag and the release date.
+
+The heuristic is not an evaluation. Every score carries `intelligence_source`: `artificial_analysis`, `override` or `heuristic`. `hmesh market show` and the `get_model_market` MCP tool print that field.
+
+`hmesh market refresh` writes a snapshot to `.harness-mesh/state.db`. The default lifetime is six hours. Artificial Analysis is cached for at least twelve hours and limited to 20 requests per process per day. A failed refresh keeps the previous snapshot and marks it stale. Cached data older than seven days still works and is flagged expired.
+
+`market.enabled: false` or `HARNESS_MESH_OFFLINE=1` stops every outbound request. Dispatch reads only the cache, so a slow or unreachable source never delays a ticket.
+
+### Task kinds and tiers
+
+`task_kind` is `plan`, `audit`, `review`, `implement`, `refactor`, `debug`, `test`, `docs` or `auto`. `auto` reads the objective (Chinese and English keywords) and otherwise follows `evaluate_difficulty`.
+
+| Tier | Task kinds and difficulty | Rule |
+| :--- | :--- | :--- |
+| `premium` | `plan`, `audit`, `review`, or `critical` | highest intelligence; ties go to the lower blended price |
+| `balanced` | `refactor`, `debug`, or `high` | highest intelligence per blended dollar among candidates at or above 85% of the best score |
+| `value` | `implement`, `test`, `docs`, or `low`/`medium` | cheapest candidate at or above a difficulty floor (0.55 for low, 0.70 for medium) |
+
+`blended_price = (3 * input + output) / 4` in USD per million tokens. A model with no known price is left out of price comparisons and used only when nothing else qualifies.
+
+Claude Code and Codex bill through a subscription quota rather than per token. The router uses the API list price as a proxy for quota consumption and states that in every decision record.
+
+### Routing modes
+
+`routing.mode` defaults to `auto`. `manual` keeps the model you pass; `off` uses the four difficulty tiers. `HARNESS_MESH_ROUTING` overrides the configured default, and a request-level `routing_mode` wins over both.
+
+`routing.pins` fixes `{harness, model}` for one task kind. `routing.premium_hints` and `routing.value_hints` add weight to matching models; `routing.strict_hints: true` turns them into a hard filter. The example configuration uses exact `glm-5.3`, so it does not match `glm-5.3-flash`.
+
+When no market snapshot exists, no harness model matches the catalogue, or the planner returns no choice, dispatch falls back to `discovery.resolve_model(harness, difficulty)`. The decision record keeps the reason.
+
+### Decision record
+
+Every result carries a `routing` object: mode, task kind, tier, chosen harness/model/effort, intelligence and its source, list prices, the top three alternatives with scores, the data sources, `fetched_at`, `stale`, `expired` and the match confidence. The same block appears at the top of the transcript.
+
+### Not connected
+
+The Aider polyglot leaderboard has no data after 2025-10. The community LMArena snapshot (`oolong-tea-2026/arena-ai-leaderboards`) has returned empty `leaderboards` every day since 2026-10-20. Neither source is used.
 
 ## MCP tools (15)
 
@@ -283,6 +338,16 @@ Key settings:
 | `max_failover_attempts` | `4` | Maximum failovers per ticket |
 | `quota_probe_interval_seconds` | `60` | Background recovery probe interval |
 | `difficulty_timeout_seconds` | `600/1200/1800/3600` | Per-tier assignment timeout |
+| `market.enabled` | `true` | Read-only market data and its snapshot cache |
+| `market.ttl_seconds` | `21600` | Snapshot lifetime for OpenRouter and models.dev |
+| `market.sources` | three sources | Providers to refresh |
+| `market.aliases` | `{}` | Map a harness model id or glob to a market key |
+| `market.overrides` | `{}` | Glob-keyed intelligence and price overrides |
+| `routing.mode` | `auto` | `auto`, `manual` or `off`; `HARNESS_MESH_ROUTING` wins |
+| `routing.floors` | `0.55/0.70` | Value-tier intelligence floor by difficulty |
+| `routing.premium_hints` / `routing.value_hints` | `[]` | Model globs weighted per tier |
+| `routing.strict_hints` | `false` | Turn hint weighting into a filter |
+| `routing.pins` | `{}` | Fixed harness/model per task kind |
 
 ## Testing
 
@@ -292,7 +357,7 @@ Key settings:
 .venv/bin/pytest -v
 ```
 
-The fast suite uses mocked adapters and temporary Git repositories. `tests/test_local_machine_harnesses.py` additionally exercises the real locally installed harnesses when the macOS bundles are present; it asserts real binary resolution, real model inventories, and a real DeepSeek ticket that creates a file in a worktree and applies it back. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow.
+The fast suite uses mocked adapters, temporary Git repositories, `httpx.MockTransport` market providers and cached snapshots. It opens no sockets. Live HTTP checks live in `tests/test_real_machine_market.py` and run only with `HARNESS_MESH_REAL_MACHINE=1`; the Artificial Analysis branch also needs `ARTIFICIAL_ANALYSIS_API_KEY`. `tests/test_local_machine_harnesses.py` additionally exercises the real locally installed harnesses when the macOS bundles are present; it asserts real binary resolution, real model inventories, and a real DeepSeek ticket that creates a file in a worktree and applies it back. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow.
 
 ## Operational notes
 

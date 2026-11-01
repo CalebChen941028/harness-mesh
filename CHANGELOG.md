@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-11-01
 
 ### Fixed
 
@@ -9,12 +9,17 @@
 
 ### Added
 
-- `hmesh install --approve {read,dispatch,all,none}` (default `dispatch`) writes per-tool MCP pre-approvals for Claude Code (`~/.claude/settings.json`), Codex (`~/.codex/config.toml`) and Antigravity (`~/.gemini/config/config.json`). `read` covers the seven read tools, `dispatch` adds the three dispatch tools, `all` covers all thirteen, and `none` writes nothing while removing rules written by this tool. ZCode and DeepSeek Harness need no approval settings.
+- Read-only market data layer: OpenRouter and models.dev list prices, Artificial Analysis intelligence scores, model-id matching with explicit aliases, a six-hour snapshot cache, and `market.enabled` / `HARNESS_MESH_OFFLINE` switches. Every score is labelled `artificial_analysis`, `override` or `heuristic`; a failed refresh keeps the stale snapshot.
+- Task-kind routing (`plan`, `audit`, `review`, `implement`, `refactor`, `debug`, `test`, `docs`, `auto`) with `premium`, `balanced` and `value` tiers, configurable value floors, model pins and soft or strict premium/value hints. Requests can set `task_kind`, `routing_mode`, `max_price_per_mtok` and `min_intelligence`; `HARNESS_MESH_ROUTING` overrides the configured mode.
+- `hmesh market refresh`, `hmesh market show [--unmatched]`, `hmesh route`, `--kind` and `--routing-mode` on `hmesh dispatch`, plus the `get_model_market` and `preview_routing` MCP tools. Every task result carries a `routing` record and the transcript starts with the same block.
+- Background market refresh on MCP server start and on the cache TTL. Failures log a warning and leave dispatch unchanged.
+- `hmesh install --approve {read,dispatch,all,none}` (default `dispatch`) writes per-tool MCP pre-approvals for Claude Code (`~/.claude/settings.json`), Codex (`~/.codex/config.toml`) and Antigravity (`~/.gemini/config/config.json`). `read` covers the nine read tools, `dispatch` adds the three dispatch tools, `all` covers all fifteen, and `none` writes nothing while removing rules written by this tool. ZCode and DeepSeek Harness need no approval settings.
 - `hmesh doctor` reports approved and missing tools against the default `dispatch` level without changing files.
 
 ### Changed
 
 - The install epilogue states the level and number of pre-approved tools instead of printing the old service-wide Codex and Antigravity hint.
+- MCP now exposes 15 tools: 9 read, 3 dispatch and 3 write. `hmesh install --approve read` writes 9 rules, the default `dispatch` level 12, and `all` 15.
 
 ## 0.3.1 — 2026-11-01
 

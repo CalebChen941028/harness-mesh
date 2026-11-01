@@ -49,6 +49,67 @@ failover_priority:
   - antigravity
   - zcode
 
+# ---------------------------------------------------------------------------
+# Model market (read-only)
+#
+# OpenRouter and models.dev need no key. Artificial Analysis adds benchmark
+# intelligence scores when ARTIFICIAL_ANALYSIS_API_KEY is present; without it
+# the router labels its own estimate as intelligence_source: heuristic.
+# Dispatch reads only the cached snapshot, so no network call can delay a
+# ticket. Set enabled: false or export HARNESS_MESH_OFFLINE=1 to stop all
+# outbound market requests.
+# ---------------------------------------------------------------------------
+market:
+  enabled: true
+  ttl_seconds: 21600
+  sources:
+    - openrouter
+    - models_dev
+    - artificial_analysis
+  artificial_analysis_key_env: ARTIFICIAL_ANALYSIS_API_KEY
+  # Map a harness model id (or glob) to a market key shown by
+  # `hmesh market show --unmatched`.
+  aliases: {}
+  # Override intelligence or prices by market-key glob. Overrides win over
+  # Artificial Analysis and the heuristic.
+  overrides: {}
+  #  z-ai/glm-5.3:
+  #    intelligence: 61.0
+  #    input_per_mtok: 0.7
+  #    output_per_mtok: 2.8
+
+# ---------------------------------------------------------------------------
+# Task-kind routing
+#
+# premium: plan / audit / review and critical difficulty -> highest intelligence
+# balanced: refactor / debug and high difficulty -> best intelligence per dollar
+# value: implement / test / docs and low/medium -> cheapest above the floor
+# Hints add weight unless strict_hints is true, in which case they filter.
+# `glm-5.3` is an exact glob; it does not match `glm-5.3-flash`.
+# ---------------------------------------------------------------------------
+routing:
+  mode: auto
+  floors:
+    low: 0.55
+    medium: 0.70
+  premium_hints:
+    - claude-opus*
+    - claude-sonnet*
+    - gemini-4-argon*
+    - glm-5.3
+  value_hints:
+    - deepseek-v4.1-flash*
+    - glm-5.3-flash*
+    - gemini-3.8-flash*
+    - claude-haiku*
+  strict_hints: false
+  # Fix a harness/model pair for one task kind, for example:
+  # pins:
+  #   audit:
+  #     harness: claude_code
+  #     model: claude-opus-5-5
+  pins: {}
+
 skill_roots:
   - ~/.dsh/skills
   - ~/.gemini/config/skills

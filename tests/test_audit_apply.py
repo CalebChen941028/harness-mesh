@@ -106,4 +106,4 @@ def test_docstring_and_dependency_bounds_and_ci_units():
             assert bounds[name] in dependency, dependency
     assert Path(".github/dependabot.yml").exists()
     assert "pip-audit" in Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-    assert harness_mesh.__version__ == "0.3.1"
+    assert harness_mesh.__version__ == "0.4.0"
