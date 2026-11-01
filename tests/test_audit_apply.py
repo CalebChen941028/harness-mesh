@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -82,7 +83,8 @@ def test_cli_copy_requires_force_copy(tmp_path):
     assert result.exit_code != 0
     assert "force-copy" in result.output
     help_result = runner.invoke(cli_app, ["apply", "--help"])
-    assert "--force-copy" in help_result.output
+    # Rich styles option names with ANSI codes when CI forces colour output.
+    assert "--force-copy" in re.sub(r"\x1b\[[0-9;]*m", "", help_result.output)
 
 
 def test_docstring_and_dependency_bounds_and_ci_units():
