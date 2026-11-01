@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "harness-mesh"
-version = "0.2.0"
+version = "0.3.0"
 description = "Federated cross-harness scheduling mesh with ticket/assignment failover, dynamic model discovery and quota recovery."
 readme = "README.md"
 requires-python = ">=3.11"

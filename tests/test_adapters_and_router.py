@@ -1266,7 +1266,10 @@ def test_cli_init_mcp_and_help():
 
     help_result = runner.invoke(cli_app, ["--help"])
     assert help_result.exit_code == 0
-    for command in ("status", "models", "quota", "skills", "dispatch", "tasks", "read", "apply", "init-mcp", "context"):
+    for command in (
+        "status", "models", "quota", "skills", "dispatch", "tasks", "read", "apply",
+        "init-mcp", "context", "install",
+    ):
         assert command in help_result.output
 
 
