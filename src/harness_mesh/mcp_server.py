@@ -1,9 +1,10 @@
-"""FastMCP server exposing the thirteen cross-harness orchestration tools."""
+"""FastMCP server exposing the fifteen cross-harness orchestration tools."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import fnmatch
 import os
 from typing import Any
 
@@ -24,6 +25,7 @@ from .models import (
     ContinuationCheckpoint,
     QuotaExhaustedPolicy,
     TaskDifficulty,
+    TaskKind,
     TaskRequest,
     WorkspaceMode,
 )
@@ -34,6 +36,8 @@ from .workspace import WorkspaceError
 TOOL_NAMES = [
     "list_harnesses",
     "discover_harness_models",
+    "get_model_market",
+    "preview_routing",
     "list_skills_and_plugins",
     "dispatch_task",
     "parallel_dispatch",
@@ -95,6 +99,63 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
         return payload
 
     @server.tool()
+    def get_model_market(query: str = "", limit: int = 50) -> dict[str, Any]:
+        """Read cached model prices, context windows and intelligence scores.
+
+        ``intelligence_source`` says whether a score came from Artificial
+        Analysis, a user override or the local heuristic.  This tool never
+        refreshes the cache and never performs a network request.
+        """
+
+        catalog = router.market.catalog()
+        pattern = (query or "").strip().lower()
+        models = list(catalog.models)
+        if pattern:
+            if any(character in pattern for character in "*?["):
+                models = [
+                    model
+                    for model in models
+                    if fnmatch.fnmatchcase(model.key.lower(), pattern)
+                    or fnmatch.fnmatchcase(model.name.lower(), pattern)
+                ]
+            else:
+                models = [
+                    model
+                    for model in models
+                    if pattern in model.key.lower() or pattern in model.name.lower()
+                ]
+        cap = max(1, min(int(limit), 500))
+        return {
+            "models": [model.model_dump(mode="json") for model in models[:cap]],
+            "matched": len(models),
+            "returned": min(len(models), cap),
+            "sources": list(catalog.sources),
+            "fetched_at": catalog.fetched_at,
+            "stale": catalog.stale,
+            "expired": catalog.expired,
+            "warnings": list(catalog.warnings),
+        }
+
+    @server.tool()
+    async def preview_routing(
+        objective: str,
+        task_kind: str = "auto",
+        difficulty: str = "auto",
+        target_harness: str = "auto",
+    ) -> dict[str, Any]:
+        """Preview the routing decision for an objective without dispatching it."""
+
+        try:
+            return await router.preview_routing(
+                objective,
+                task_kind=task_kind,
+                difficulty=difficulty,
+                target_harness=target_harness,
+            )
+        except (ValueError, TypeError) as exc:
+            return {"error": _error_detail(exc), "objective": objective}
+
+    @server.tool()
     def list_skills_and_plugins(query: str = "") -> dict[str, Any]:
         """Search indexed SKILL.md files and MCP/plugin manifests."""
 
@@ -105,6 +166,10 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
         objective: str,
         target_harness: str,
         difficulty: str = "auto",
+        task_kind: str = "auto",
+        routing_mode: str | None = None,
+        max_price_per_mtok: float | None = None,
+        min_intelligence: float | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
         skills: list[str] | None = None,
@@ -139,6 +204,7 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
             "target_harness": target_harness,
             "objective": objective,
             "difficulty": TaskDifficulty(difficulty),
+            "task_kind": TaskKind(task_kind),
             "model": model,
             "reasoning_effort": reasoning_effort,
             "skills": list(skills or []),
@@ -160,6 +226,12 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
             "trace_chain": _merge_trace_chain(trace_chain, inherited_trace),
             "checkpoint": ContinuationCheckpoint.model_validate(checkpoint) if checkpoint else None,
         }
+        if routing_mode is not None:
+            request_kwargs["routing_mode"] = routing_mode
+        if max_price_per_mtok is not None:
+            request_kwargs["max_price_per_mtok"] = max_price_per_mtok
+        if min_intelligence is not None:
+            request_kwargs["min_intelligence"] = min_intelligence
         if max_failover_attempts is not None:
             request_kwargs["max_failover_attempts"] = max_failover_attempts
         parent_task_id = os.environ.get("HARNESS_MESH_TASK_ID")

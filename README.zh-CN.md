@@ -10,7 +10,7 @@ Harness-Mesh 是本地编排层，交付形态有四个：
 
 - Python 包 `harness_mesh`：类型化数据模型和 SQLite 状态账本；
 - 命令行 `hmesh`：查看状态、发现模型、派发任务、管理共享上下文、合入补丁；
-- stdio MCP 服务端 `hmesh-mcp`：向主控 Harness 暴露 13 个工具；
+- stdio MCP 服务端 `hmesh-mcp`：向主控 Harness 暴露 15 个工具；
 - 本地运行目录 `.harness-mesh/`：状态库、Worktree、分页资源。
 
 它不提供模型、不运营云端服务、不带 Web UI 或多租户调度。模型调用由本机已安装并登录的 Harness CLI 完成；Harness-Mesh 只在本地记录状态，并把裁剪后的摘要返回给主控端。
@@ -78,7 +78,7 @@ hmesh install
 ```bash
 hmesh install --dry-run                 # 只显示计划执行的命令/文件，不修改任何配置
 hmesh install --yes                     # 非交互确认后安装
-hmesh install --approve read            # 预先批准 7 个只读 MCP 工具
+hmesh install --approve read            # 预先批准 9 个只读 MCP 工具
 hmesh install --harness zcode           # 只安装一个 Harness（可重复）
 hmesh install --workspace /path/project # 显式绑定 MCP 工作区
 hmesh install --uninstall               # 卸载集成
@@ -91,13 +91,13 @@ hmesh install --uninstall               # 卸载集成
 交互式会话在调用 MCP 工具前会询问。`codex exec`、`agy -p` 这类无界面命令无法回答，`hmesh install` 因此按工具写入放行规则：
 
 ```bash
-hmesh install --approve dispatch   # 默认：10 个只读与调度工具
-hmesh install --approve read       # 7 个只读工具
-hmesh install --approve all        # 全部 13 个
+hmesh install --approve dispatch   # 默认：12 个只读与调度工具
+hmesh install --approve read       # 9 个只读工具
+hmesh install --approve all        # 全部 15 个
 hmesh install --approve none       # 不写入，并清掉本工具写过的规则
 ```
 
-默认级别 `dispatch` 批准 7 个只读工具，以及 `dispatch_task`、`parallel_dispatch`、`cancel_task`。派发任务在隔离 Worktree 内运行，改动要经过 `apply_task_patch` 才进入主工作区。三个写入工具仍默认人工批准：`apply_task_patch`、`report_quota_status`、`update_project_context` 会改动主工作区或共享状态。确实需要时用 `--approve all` 一并放行。
+默认级别 `dispatch` 批准 9 个只读工具，以及 `dispatch_task`、`parallel_dispatch`、`cancel_task`。派发任务在隔离 Worktree 内运行，改动要经过 `apply_task_patch` 才进入主工作区。三个写入工具仍默认人工批准：`apply_task_patch`、`report_quota_status`、`update_project_context` 会改动主工作区或共享状态。确实需要时用 `--approve all` 一并放行。
 
 | Harness | 文件 | 规则 |
 | :--- | :--- | :--- |
@@ -211,7 +211,7 @@ Ticket task_x（一份 Git Worktree）
 
 `TaskRequest.session_id` 会透传到 MCP 和 `AdapterCall`。适配器将其映射为 Claude/ZCode `--resume`、`codex exec resume <id>`、DSH `--session-id`、Antigravity `--conversation`。写入模式自动注入各 CLI 的审批放行参数；只读 Ticket 使用 plan/read-only 模式并在一次性 Worktree 中执行。
 
-## MCP 工具（13 个）
+## MCP 工具（15 个）
 
 `list_harnesses`、`discover_harness_models`、`list_skills_and_plugins`、`dispatch_task`、`parallel_dispatch`、`get_task_status`、`read_task_resource`、`get_quota_status`、`report_quota_status`、`apply_task_patch`、`cancel_task`、`get_project_context`、`update_project_context`。
 

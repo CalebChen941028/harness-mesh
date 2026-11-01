@@ -10,7 +10,7 @@ Harness-Mesh is a **local orchestration layer**, shipped as:
 
 - a Python package (`harness_mesh`) with a typed data model and SQLite ledger;
 - a CLI, `hmesh`, for status, model discovery, dispatch, context and patches;
-- an stdio MCP server, `hmesh-mcp`, exposing 13 tools to a controller harness;
+- an stdio MCP server, `hmesh-mcp`, exposing 15 tools to a controller harness;
 - a local runtime directory, `.harness-mesh/`, holding state, worktrees and paged resources.
 
 It does not provide a model, a hosted service, a web UI or a multi-user scheduler. It orchestrates the harness CLIs you already have installed and authenticated on the machine. Prompts and code are sent to those CLIs; the mesh process itself keeps a local ledger and bounded summaries.
@@ -83,7 +83,7 @@ Useful options:
 ```bash
 hmesh install --dry-run                 # print planned commands/files, change nothing
 hmesh install --yes                     # non-interactive install
-hmesh install --approve read            # pre-approve 7 read-only MCP tools
+hmesh install --approve read            # pre-approve 9 read-only MCP tools
 hmesh install --harness zcode           # one harness only (repeatable)
 hmesh install --workspace /path/project # pin the MCP workspace explicitly
 hmesh install --uninstall               # remove integrations
@@ -96,13 +96,13 @@ Without `--dry-run`, `hmesh install` prints the planned files and commands and a
 Interactive sessions ask before an MCP tool runs. Headless commands such as `codex exec` and `agy -p` cannot answer that prompt, so `hmesh install` writes per-tool allow rules:
 
 ```bash
-hmesh install --approve dispatch   # default: 10 read and dispatch tools
-hmesh install --approve read       # 7 read-only tools
-hmesh install --approve all        # all 13 tools
+hmesh install --approve dispatch   # default: 12 read and dispatch tools
+hmesh install --approve read       # 9 read-only tools
+hmesh install --approve all        # all 15 tools
 hmesh install --approve none       # write nothing and remove rules written by hmesh
 ```
 
-`dispatch`, the default, approves the seven read tools plus `dispatch_task`, `parallel_dispatch` and `cancel_task`. Dispatched work runs in an isolated worktree; its changes reach the primary checkout only through `apply_task_patch`. The three write tools stay manual: `apply_task_patch`, `report_quota_status` and `update_project_context` change the primary workspace or shared state. Pass `--approve all` to pre-approve them too.
+`dispatch`, the default, approves the nine read tools plus `dispatch_task`, `parallel_dispatch` and `cancel_task`. Dispatched work runs in an isolated worktree; its changes reach the primary checkout only through `apply_task_patch`. The three write tools stay manual: `apply_task_patch`, `report_quota_status` and `update_project_context` change the primary workspace or shared state. Pass `--approve all` to pre-approve them too.
 
 | Harness | File | Rule |
 | :--- | :--- | :--- |
@@ -220,12 +220,14 @@ These blocks are project data, not instructions that override the ticket objecti
 
 `TaskRequest.session_id` flows through MCP and `AdapterCall`. Adapters map it to `--resume` (Claude/ZCode), `codex exec resume <id>`, `--session-id` (DSH) or `--conversation` (Antigravity). Write-mode templates inject each CLI's approval bypass; read-only tickets use plan/read-only modes and run in a disposable worktree.
 
-## MCP tools (13)
+## MCP tools (15)
 
 | Tool | Purpose |
 | :--- | :--- |
 | `list_harnesses` | Installed harnesses, real binary, version, authorised models, tier map and quota state |
 | `discover_harness_models` | Force three-layer discovery for one or all harnesses |
+| `get_model_market` | Read cached list prices, context windows and intelligence scores; `intelligence_source` names the source |
+| `preview_routing` | Rank a task without dispatching: task kind, tier, chosen model and alternatives |
 | `list_skills_and_plugins` | Search indexed `SKILL.md` files and MCP/plugin manifests |
 | `dispatch_task` | Create a ticket, choose a model and run assignments with failover |
 | `parallel_dispatch` | Dispatch several tickets concurrently |
@@ -246,8 +248,11 @@ hmesh doctor [--harness H] [--json]
 hmesh status [--refresh] [--json]
 hmesh models [--refresh] [--harness H]
 hmesh quota [--probe]
+hmesh route --objective O [--kind K] [--difficulty D] [--harness H] [--json]
+hmesh market refresh [--source S]... [--json]
+hmesh market show [--model GLOB] [--unmatched] [--json]
 hmesh skills [--query Q]
-hmesh dispatch --harness H --objective O [--difficulty D] [--fallback H]...
+hmesh dispatch --harness H --objective O [--difficulty D] [--kind K] [--routing-mode M] [--fallback H]...
 hmesh tasks [--status S]
 hmesh read <task_id> [diff|transcript|assignments] [--offset N] [--limit N]
 hmesh apply <task_id> [--strategy patch|merge|copy] [--force-copy]

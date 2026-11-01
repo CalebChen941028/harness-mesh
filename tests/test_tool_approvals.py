@@ -18,6 +18,8 @@ def test_read_level_lists_only_read_tools():
     assert tools_for_level("read") == [
         "list_harnesses",
         "discover_harness_models",
+        "get_model_market",
+        "preview_routing",
         "list_skills_and_plugins",
         "get_task_status",
         "read_task_resource",

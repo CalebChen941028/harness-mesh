@@ -1156,14 +1156,14 @@ async def test_cancel_task_kills_the_child_harness_process(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_mcp_server_registers_thirteen_tools(tmp_path):
+async def test_mcp_server_registers_fifteen_tools(tmp_path):
     mesh = make_mesh(tmp_path)
     try:
         server = create_server(mesh.router)
         tools = await server.list_tools()
         names = {tool.name for tool in tools}
         assert names == set(TOOL_NAMES)
-        assert len(names) == 13
+        assert len(names) == 15
 
         by_name = {tool.name: tool for tool in tools}
         dispatch_schema = by_name["dispatch_task"].inputSchema

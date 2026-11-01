@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import json
 import os
 import sys
@@ -20,9 +21,12 @@ from .lineage import (
     _resolved_lineage,
     _workspace_from_cwd,
 )
+from .market import list_unmatched
 from .models import (
     QuotaExhaustedPolicy,
+    RoutingMode,
     TaskDifficulty,
+    TaskKind,
     TaskRequest,
     WorkspaceMode,
 )
@@ -36,6 +40,8 @@ app = typer.Typer(
 )
 context_app = typer.Typer(help="Read and update the cross-harness project context blackboard.")
 app.add_typer(context_app, name="context")
+market_app = typer.Typer(help="Inspect and refresh model prices and evaluation scores.")
+app.add_typer(market_app, name="market")
 
 
 def _json(data: Any) -> str:
@@ -87,6 +93,26 @@ def _trace_chain_option(raw: str | None) -> list[str] | None:
     if isinstance(payload, list):
         return [str(item) for item in payload]
     return None
+
+
+def _task_kind_value(raw: str) -> TaskKind:
+    try:
+        return TaskKind(str(raw).lower())
+    except ValueError as exc:
+        raise typer.BadParameter(
+            "expected one of: " + ", ".join(item.value for item in TaskKind),
+            param_hint="--kind",
+        ) from exc
+
+
+def _routing_mode_value(raw: str) -> RoutingMode:
+    try:
+        return RoutingMode(str(raw).lower())
+    except ValueError as exc:
+        raise typer.BadParameter(
+            "expected one of: " + ", ".join(item.value for item in RoutingMode),
+            param_hint="--routing-mode",
+        ) from exc
 
 
 def _approval_summary(level: str, results) -> str:
@@ -392,6 +418,12 @@ def dispatch(
     objective: str = typer.Option(..., "--objective", "-o", help="Task objective."),
     harness: str = typer.Option("auto", "--harness", "-H", help="Target harness or 'auto'."),
     difficulty: str = typer.Option("auto", "--difficulty", "-d", help="auto|low|medium|high|critical."),
+    kind: str = typer.Option("auto", "--kind", "-k", help="auto|plan|audit|review|implement|refactor|debug|test|docs."),
+    routing_mode: Optional[str] = typer.Option(
+        None,
+        "--routing-mode",
+        help="auto|manual|off. Omit to use routing.mode or HARNESS_MESH_ROUTING.",
+    ),
     model: Optional[str] = typer.Option(None, "--model", "-m"),
     policy: str = typer.Option("failover", "--policy", help="failover|wait_and_resume|fail."),
     fallback: Optional[list[str]] = typer.Option(None, "--fallback", help="Preferred failover harness (repeatable)."),
@@ -425,6 +457,7 @@ def dispatch(
             target_harness=harness,
             objective=objective,
             difficulty=TaskDifficulty(difficulty),
+            task_kind=_task_kind_value(kind),
             model=model,
             on_quota_exhausted=QuotaExhaustedPolicy(policy),
             fallback_harnesses=list(fallback or []),
@@ -437,6 +470,8 @@ def dispatch(
             trace_chain=_merge_trace_chain(_trace_chain_option(trace_chain), inherited_trace),
             parent_task_id=os.environ.get("HARNESS_MESH_TASK_ID"),
         )
+        if routing_mode is not None:
+            request.routing_mode = _routing_mode_value(routing_mode)
         result = asyncio.run(runtime.router.dispatch(request))
     finally:
         runtime.storage.close()
@@ -615,6 +650,178 @@ def context_set(
         typer.echo(_json(payload))
         return
     typer.echo(f"saved [{payload.get('category')}] {payload.get('key')}")
+
+
+def _price(value: float | None) -> str:
+    return "-" if value is None else f"{value:g}"
+
+
+@market_app.command("refresh")
+def market_refresh(
+    ctx: typer.Context,
+    source: Optional[list[str]] = typer.Option(
+        None, "--source", "-s", help="Refresh only this source (repeatable)."
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Fetch the configured market sources and update the local snapshot cache."""
+
+    runtime = _runtime(ctx)
+    try:
+        result = asyncio.run(
+            runtime.router.market.refresh(force=True, sources=source)
+        )
+    finally:
+        runtime.storage.close()
+    if json_output:
+        typer.echo(_json(result))
+        return
+    for status in result.statuses:
+        detail = f" error={status.error}" if status.error else ""
+        typer.echo(
+            f"{status.source:20} {status.status:12} models={status.models}{detail}"
+        )
+    catalog = result.catalog
+    typer.echo(
+        f"catalog: {len(catalog.models)} models from "
+        f"{', '.join(catalog.sources) or '-'} stale={catalog.stale}"
+    )
+    for warning in catalog.warnings:
+        typer.echo(f"warning: {warning}")
+
+
+@market_app.command("show")
+def market_show(
+    ctx: typer.Context,
+    model: Optional[str] = typer.Option(
+        None, "--model", "-m", help="Filter by a model glob (matched against key and name)."
+    ),
+    unmatched: bool = typer.Option(
+        False, "--unmatched", help="List harness models that have no market match."
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Show the cached market catalogue and optional unmatched harness models."""
+
+    runtime = _runtime(ctx)
+    try:
+        catalog = runtime.router.market.catalog()
+        rows = list(catalog.models)
+        if model:
+            pattern = model.lower()
+            rows = [
+                item
+                for item in rows
+                if fnmatch.fnmatchcase(item.key.lower(), pattern)
+                or fnmatch.fnmatchcase(item.name.lower(), pattern)
+            ]
+        payload: dict[str, Any] = {
+            "models": [item.model_dump(mode="json") for item in rows],
+            "sources": list(catalog.sources),
+            "fetched_at": catalog.fetched_at,
+            "stale": catalog.stale,
+            "expired": catalog.expired,
+            "warnings": list(catalog.warnings),
+        }
+        if unmatched:
+            inventory: dict[str, list[str]] = {}
+            for found in runtime.storage.list_discovered_models():
+                inventory.setdefault(found.harness, []).append(found.model_id)
+            payload["unmatched"] = list_unmatched(
+                inventory,
+                catalog.models,
+                aliases=runtime.config.market.aliases,
+            )
+    finally:
+        runtime.storage.close()
+
+    if json_output:
+        typer.echo(_json(payload))
+        return
+    if not rows:
+        typer.echo("No market data is cached. Run `hmesh market refresh`.")
+    for item in rows:
+        typer.echo(
+            f"{item.key:48} in={_price(item.input_per_mtok):>8} "
+            f"out={_price(item.output_per_mtok):>8} "
+            f"intel={item.intelligence if item.intelligence is not None else '-':>5} "
+            f"source={item.intelligence_source or '-'} ctx={item.context_window or '-'}"
+        )
+    if payload["stale"]:
+        typer.echo("cache is stale; refresh it when the network is available")
+    if unmatched:
+        entries = payload["unmatched"]
+        if not entries:
+            typer.echo("No unmatched harness models.")
+        for entry in entries:
+            effort = f" effort={entry['effort_variant']}" if entry["effort_variant"] else ""
+            typer.echo(
+                f"unmatched {entry['harness']:14} {entry['model_id']}{effort} "
+                "-> add market.aliases"
+            )
+
+
+@app.command()
+def route(
+    ctx: typer.Context,
+    objective: str = typer.Option(..., "--objective", "-o", help="Task objective to preview."),
+    kind: str = typer.Option("auto", "--kind", "-k", help="auto|plan|audit|review|implement|refactor|debug|test|docs."),
+    difficulty: str = typer.Option("auto", "--difficulty", "-d", help="auto|low|medium|high|critical."),
+    harness: str = typer.Option("auto", "--harness", "-H", help="Target harness or 'auto'."),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+) -> None:
+    """Preview the model routing decision without dispatching a ticket."""
+
+    task_kind = _task_kind_value(kind)
+    try:
+        level = TaskDifficulty(str(difficulty).lower())
+    except ValueError as exc:
+        raise typer.BadParameter(
+            "expected one of: " + ", ".join(item.value for item in TaskDifficulty),
+            param_hint="--difficulty",
+        ) from exc
+    runtime = _runtime(ctx)
+    try:
+        payload = asyncio.run(
+            runtime.router.preview_routing(
+                objective,
+                task_kind=task_kind.value,
+                difficulty=level.value,
+                target_harness=harness,
+            )
+        )
+    finally:
+        runtime.storage.close()
+
+    if json_output:
+        typer.echo(_json(payload))
+        return
+    if payload.get("error"):
+        typer.echo(f"error: {payload['error']}", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(
+        f"task_kind={payload['task_kind']} tier={payload['tier']} "
+        f"candidates={payload['candidate_count']} market_models={payload['market_models']}"
+    )
+    routing = payload.get("routing") or {}
+    chosen = routing.get("chosen")
+    if chosen:
+        typer.echo(
+            f"route: {chosen['harness']}/{chosen['model']} "
+            f"effort={chosen.get('effort') or 'default'} "
+            f"intelligence={chosen.get('intelligence')} "
+            f"source={chosen.get('intelligence_source')} "
+            f"blended_price={chosen.get('blended_price')}"
+        )
+    else:
+        typer.echo("no routed choice; dispatch would use the existing difficulty tier")
+    for alternative in routing.get("alternatives") or []:
+        typer.echo(
+            f"  alternative {alternative['harness']}/{alternative['model']} "
+            f"score={alternative['score']} intelligence={alternative['intelligence']}"
+        )
+    for reason in routing.get("reasons") or []:
+        typer.echo(f"  - {reason}")
 
 
 @app.command()

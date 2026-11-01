@@ -16,6 +16,8 @@ DEFAULT_APPROVAL_LEVEL = "dispatch"
 TOOL_APPROVAL_CLASSES: dict[str, str] = {
     "list_harnesses": "read",
     "discover_harness_models": "read",
+    "get_model_market": "read",
+    "preview_routing": "read",
     "list_skills_and_plugins": "read",
     "get_task_status": "read",
     "read_task_resource": "read",
