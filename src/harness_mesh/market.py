@@ -14,7 +14,9 @@ header of a request to ``artificialanalysis.ai``.
 from __future__ import annotations
 
 import asyncio
+import csv
 import fnmatch
+import io
 import json
 import logging
 import math
@@ -22,20 +24,24 @@ import os
 import re
 import statistics
 import time
-from datetime import date, datetime, timezone
+import zipfile
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import __version__
-from .config import MarketConfig, MarketOverrideConfig
+from .config import EpochConfig, MarketConfig, MarketOverrideConfig
 from .storage import StateStore
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_HOSTS = frozenset({"openrouter.ai", "models.dev", "artificialanalysis.ai"})
+ALLOWED_HOSTS = frozenset(
+    {"openrouter.ai", "models.dev", "artificialanalysis.ai", "epoch.ai"}
+)
 MAX_RESPONSE_BYTES = 25 * 1024 * 1024
+MAX_EPOCH_UNCOMPRESSED_BYTES = 80 * 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 20.0
 MAX_REDIRECTS = 3
 MAX_TEXT_LENGTH = 300
@@ -47,10 +53,20 @@ MODELSDEV_URL = "https://models.dev/api.json"
 # https://artificialanalysis.ai/api/v2/openapi, LLMModelsFreeResponse).
 ARTIFICIAL_ANALYSIS_URL = "https://artificialanalysis.ai/api/v2/language/models/free"
 ARTIFICIAL_ANALYSIS_MIN_TTL = 43_200
+EPOCH_URL = "https://epoch.ai/data/benchmark_data.zip"
+EPOCH_ATTRIBUTION = (
+    "Benchmark data: Epoch AI, 'Capabilities & benchmarking', "
+    "https://epoch.ai/benchmarks (CC BY 4.0)"
+)
 
-SOURCE_ORDER = ("openrouter", "models_dev", "artificial_analysis")
+SOURCE_ORDER = ("openrouter", "models_dev", "artificial_analysis", "epoch")
 _SOURCE_PRIORITY = {name: index for index, name in enumerate(SOURCE_ORDER)}
-_INTELLIGENCE_SOURCES = {"artificial_analysis", "heuristic", "override"}
+_INTELLIGENCE_SOURCES = {
+    "artificial_analysis",
+    "epoch_ai",
+    "heuristic",
+    "override",
+}
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _BRACKETS = re.compile(r"\[[^\]]*\]")
 _DATE_SUFFIX_8 = re.compile(r"-\d{8}$")
@@ -83,6 +99,10 @@ class MarketModel(BaseModel):
     release_date: str | None = None
     intelligence: float | None = None
     intelligence_source: str | None = None
+    intelligence_reasoning: float | None = None
+    intelligence_coding: float | None = None
+    benchmarks_used: list[str] = Field(default_factory=list)
+    benchmark_data_date: str | None = None
     speed_tps: float | None = None
     # Where ``input_per_mtok``/``output_per_mtok`` came from.  ``first_party``
     # means a model vendor's own catalogue entry, ``median`` the fallback over
@@ -285,14 +305,15 @@ def _redirect_target(current: httpx.URL, location: str) -> httpx.URL:
     return target
 
 
-async def fetch_json(
+async def fetch_bytes(
     url: str,
     *,
     transport: httpx.AsyncBaseTransport | None = None,
     headers: Mapping[str, str] | None = None,
     max_bytes: int | None = None,
-) -> Any:
-    """HTTPS GET a JSON document from an allowlisted host with hard limits."""
+    accept: str = "application/json",
+) -> bytes:
+    """HTTPS GET a document from an allowlisted host with hard limits."""
 
     current = httpx.URL(str(url))
     if not _allowed_target(current):
@@ -303,7 +324,7 @@ async def fetch_json(
     limit = MAX_RESPONSE_BYTES if max_bytes is None else max_bytes
     request_headers = {
         "User-Agent": f"harness-mesh/{__version__}",
-        "Accept": "application/json",
+        "Accept": accept,
         **(dict(headers) if headers else {}),
     }
     async with httpx.AsyncClient(
@@ -340,12 +361,27 @@ async def fetch_json(
                             f"response from {current.host} exceeds the {limit}-byte limit"
                         )
                     chunks.append(chunk)
-                body = b"".join(chunks)
-                try:
-                    return json.loads(body.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                    raise MarketError(f"{current.host} returned invalid JSON: {exc}") from exc
+                return b"".join(chunks)
         raise MarketError(f"too many redirects while fetching {url}")
+
+
+async def fetch_json(
+    url: str,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+    headers: Mapping[str, str] | None = None,
+    max_bytes: int | None = None,
+) -> Any:
+    """HTTPS GET a JSON document from an allowlisted host with hard limits."""
+
+    body = await fetch_bytes(
+        url, transport=transport, headers=headers, max_bytes=max_bytes
+    )
+    host = httpx.URL(str(url)).host
+    try:
+        return json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MarketError(f"{host} returned invalid JSON: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +426,27 @@ class ModelsDevProvider(MarketProvider):
         return parse_models_dev(
             payload, first_party_providers=self.first_party_providers
         )
+
+
+class EpochProvider(MarketProvider):
+    """Epoch AI's CC BY 4.0 benchmark archive, downloaded as a single zip."""
+
+    name = "epoch"
+
+    def __init__(
+        self,
+        *,
+        config: EpochConfig | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
+        self.config = config or EpochConfig()
+        self.transport = transport
+
+    async def fetch(self) -> list[MarketModel]:
+        payload = await fetch_bytes(
+            EPOCH_URL, transport=self.transport, accept="application/zip"
+        )
+        return parse_epoch_zip(payload, self.config)
 
 
 class ArtificialAnalysisProvider(MarketProvider):
@@ -679,6 +736,271 @@ def parse_models_dev(
     return models
 
 
+# ---------------------------------------------------------------------------
+# Epoch AI benchmark archive
+# ---------------------------------------------------------------------------
+
+_EPOCH_SCORE_COLUMNS = (
+    "Best score (across scorers)",
+    "mean_score",
+    "Score",
+    "Accuracy",
+    "Performance",
+    "Main score",
+    "Arena Score",
+    "Accuracy mean",
+    "Pass@1",
+)
+_EPOCH_EFFORT_SUFFIX = re.compile(
+    r"_(?:non-thinking|thinking|xhigh|high|medium|low|minimal|none|max)$",
+    re.IGNORECASE,
+)
+_EPOCH_DATE_SUFFIX = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+
+
+def normalize_epoch_model_name(value: str) -> str:
+    """Lowercase a ``Model version`` and drop effort and date suffixes."""
+
+    text = _text(value, 300).lower()
+    text = _EPOCH_EFFORT_SUFFIX.sub("", text)
+    text = _EPOCH_DATE_SUFFIX.sub("", text)
+    return text.strip("-_ ")
+
+
+def _unsafe_zip_path(name: str) -> bool:
+    text = (name or "").replace("\\", "/")
+    if text.startswith("/") or re.match(r"^[A-Za-z]:", text):
+        return True
+    return ".." in [part for part in text.split("/") if part not in {"", "."}]
+
+
+def _epoch_score_column(fieldnames: Sequence[str]) -> str | None:
+    available = {str(name).strip() for name in fieldnames if name}
+    for column in _EPOCH_SCORE_COLUMNS:
+        if column in available:
+            return column
+    return None
+
+
+def _parse_epoch_csv(text: str, benchmark: str, datasets: dict[str, dict[str, tuple]]) -> None:
+    reader = csv.DictReader(io.StringIO(text))
+    fieldnames = reader.fieldnames or []
+    column = _epoch_score_column(fieldnames)
+    if column is None or "Model version" not in fieldnames:
+        return
+    rows = datasets.setdefault(benchmark, {})
+    for row in reader:
+        model = normalize_epoch_model_name(row.get("Model version") or "")
+        if not model:
+            continue
+        score = _finite_number(row.get(column))
+        released = _iso_date(row.get("Release date"))
+        if score is None or released is None:
+            continue
+        organization = _text(row.get("Organization"), 120)
+        existing = rows.get(model)
+        if existing is None or score > existing[0]:
+            rows[model] = (score, released, organization)
+
+
+def _epoch_percentiles(
+    rows: Mapping[str, tuple[float, str, str]], window_days: int
+) -> dict[str, float]:
+    """Return percentile (0-100) per model inside the reference window."""
+
+    if not rows:
+        return {}
+    latest = max(date.fromisoformat(record[1]) for record in rows.values())
+    cutoff = latest - timedelta(days=max(0, int(window_days)))
+    reference = {
+        name: record
+        for name, record in rows.items()
+        if date.fromisoformat(record[1]) >= cutoff
+    }
+    if not reference:
+        return {}
+    if len(reference) == 1:
+        return {next(iter(reference)): 100.0}
+    values = sorted(record[0] for record in reference.values())
+    divisor = len(reference) - 1
+    percentiles: dict[str, float] = {}
+    for name, record in reference.items():
+        below = sum(1 for value in values if value < record[0])
+        percentiles[name] = round(100.0 * below / divisor, 4)
+    return percentiles
+
+
+def parse_epoch_zip(
+    payload: bytes,
+    config: EpochConfig | None = None,
+    *,
+    max_total_bytes: int | None = None,
+    max_entries: int = 2_000,
+) -> list[MarketModel]:
+    """Read the configured benchmark CSVs out of Epoch AI's zip archive."""
+
+    settings = config or EpochConfig()
+    limit = MAX_EPOCH_UNCOMPRESSED_BYTES if max_total_bytes is None else max_total_bytes
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(payload))
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise MarketError(f"Epoch AI returned an invalid zip archive: {exc}") from exc
+
+    wanted: list[str] = []
+    for benchmark in [*settings.reasoning_benchmarks, *settings.coding_benchmarks]:
+        name = str(benchmark).strip()
+        if name and name not in wanted:
+            wanted.append(name)
+    axis_of = {
+        str(benchmark).strip(): "reasoning"
+        for benchmark in settings.reasoning_benchmarks
+        if str(benchmark).strip()
+    }
+    for benchmark in settings.coding_benchmarks:
+        axis_of.setdefault(str(benchmark).strip(), "coding")
+
+    datasets: dict[str, dict[str, tuple[float, str, str]]] = {}
+    try:
+        infos = archive.infolist()
+        if len(infos) > max_entries:
+            raise MarketError(
+                f"Epoch AI archive has more than {max_entries} entries; refusing to read it"
+            )
+        declared = 0
+        for info in infos:
+            if _unsafe_zip_path(info.filename):
+                raise MarketError(
+                    f"Epoch AI archive contains an unsafe path: {info.filename!r}"
+                )
+            declared += max(0, int(info.file_size))
+            if declared > limit:
+                raise MarketError(
+                    f"Epoch AI archive expands beyond the {limit}-byte limit"
+                )
+        for info in infos:
+            if info.is_dir():
+                continue
+            basename = info.filename.replace("\\", "/").rsplit("/", 1)[-1]
+            if basename.lower().endswith(".csv"):
+                basename = basename[:-4]
+            if basename not in wanted:
+                continue
+            if int(info.file_size) > limit:
+                raise MarketError(
+                    f"Epoch AI archive expands beyond the {limit}-byte limit"
+                )
+            with archive.open(info) as handle:
+                raw = handle.read(limit + 1)
+            if len(raw) > limit:
+                raise MarketError(
+                    f"Epoch AI archive expands beyond the {limit}-byte limit"
+                )
+            _parse_epoch_csv(raw.decode("utf-8-sig", errors="replace"), basename, datasets)
+    except zipfile.BadZipFile as exc:
+        raise MarketError(f"Epoch AI returned an invalid zip archive: {exc}") from exc
+    finally:
+        archive.close()
+
+    latest_by_benchmark: dict[str, str] = {}
+    for benchmark, rows in datasets.items():
+        if rows:
+            latest_by_benchmark[benchmark] = max(record[1] for record in rows.values())
+
+    entries: dict[str, dict[str, Any]] = {}
+    for benchmark, rows in datasets.items():
+        axis = axis_of.get(benchmark)
+        if axis is None:
+            continue
+        for name, value in _epoch_percentiles(
+            rows, settings.reference_window_days
+        ).items():
+            entry = entries.setdefault(
+                name,
+                {
+                    "scores": {"reasoning": [], "coding": []},
+                    "used": {"reasoning": [], "coding": []},
+                    "organization": rows[name][2],
+                    "release_date": rows[name][1],
+                },
+            )
+            entry["scores"][axis].append(value)
+            entry["used"][axis].append(benchmark)
+            if rows[name][2] and not entry["organization"]:
+                entry["organization"] = rows[name][2]
+
+    minimum = max(1, int(settings.min_benchmarks))
+    models: list[MarketModel] = []
+    for name, entry in entries.items():
+        reasoning: float | None = None
+        coding: float | None = None
+        used: list[str] = []
+        used_dates: list[str] = []
+        if len(entry["scores"]["reasoning"]) >= minimum:
+            reasoning = round(float(statistics.mean(entry["scores"]["reasoning"])), 2)
+            used.extend(entry["used"]["reasoning"])
+            used_dates.extend(
+                latest_by_benchmark[benchmark]
+                for benchmark in entry["used"]["reasoning"]
+                if benchmark in latest_by_benchmark
+            )
+        if len(entry["scores"]["coding"]) >= minimum:
+            coding = round(float(statistics.mean(entry["scores"]["coding"])), 2)
+            used.extend(entry["used"]["coding"])
+            used_dates.extend(
+                latest_by_benchmark[benchmark]
+                for benchmark in entry["used"]["coding"]
+                if benchmark in latest_by_benchmark
+            )
+        if reasoning is None and coding is None:
+            continue
+        organization = _text(entry["organization"], 120)
+        vendor = _vendor_slug(organization.split("(")[0]) or "epoch"
+        models.append(
+            MarketModel(
+                key=canonical_model_key(vendor, name),
+                vendor=vendor,
+                name=name,
+                release_date=entry["release_date"],
+                intelligence_reasoning=reasoning,
+                intelligence_coding=coding,
+                benchmarks_used=used,
+                benchmark_data_date=max(used_dates) if used_dates else None,
+                sources=["epoch"],
+                aliases=[name],
+            )
+        )
+    return models
+
+
+def apply_epoch_intelligence(
+    models: Sequence[MarketModel],
+) -> list[MarketModel]:
+    """Fill ``intelligence`` from the two Epoch axes with equal weights.
+
+    Only models without an override or an Artificial Analysis score are
+    touched; the label becomes ``epoch_ai``.  A missing axis (fewer than
+    ``min_benchmarks`` scored benchmarks) gives the other axis full weight.
+    """
+
+    output = [model.model_copy(deep=True) for model in models]
+    for model in output:
+        if model.intelligence is not None and model.intelligence_source in {
+            "override",
+            "artificial_analysis",
+        }:
+            continue
+        axes = [
+            value
+            for value in (model.intelligence_reasoning, model.intelligence_coding)
+            if value is not None
+        ]
+        if not axes:
+            continue
+        model.intelligence = round(sum(axes) / len(axes), 2)
+        model.intelligence_source = "epoch_ai"
+    return output
+
+
 def parse_artificial_analysis_page(
     payload: Any, *, fetched_at: float | None = None
 ) -> tuple[list[MarketModel], dict[str, Any]]:
@@ -758,6 +1080,34 @@ def _positive_int(value: Any) -> int | None:
 # ---------------------------------------------------------------------------
 
 
+def _fold_epoch_scores(models: Sequence[MarketModel]) -> list[MarketModel]:
+    """Give an Epoch score row the key of the one priced model with its name.
+
+    Epoch publishes model names and organisations, not the vendor slugs the
+    price catalogues use.  When exactly one non-Epoch entry carries the same
+    normalised name, the score row adopts that key and merges normally;
+    ambiguous names keep their own entry instead of guessing.
+    """
+
+    targets: dict[str, set[str]] = {}
+    for model in models:
+        sources = _sources_for(model)
+        if "epoch" in sources and sources == ["epoch"]:
+            continue
+        identity = _normalize_name(model.key.split("/", 1)[-1])
+        targets.setdefault(identity, set()).add(model.key)
+    output: list[MarketModel] = []
+    for model in models:
+        sources = _sources_for(model)
+        if "epoch" in sources and sources == ["epoch"]:
+            identity = _normalize_name(model.key.split("/", 1)[-1])
+            candidates = targets.get(identity, set())
+            if len(candidates) == 1:
+                model = model.model_copy(update={"key": next(iter(candidates))})
+        output.append(model)
+    return output
+
+
 def merge_market_models(models: Sequence[MarketModel]) -> list[MarketModel]:
     """Merge entries with the same canonical key.
 
@@ -769,6 +1119,7 @@ def merge_market_models(models: Sequence[MarketModel]) -> list[MarketModel]:
     carries them through and never invents a score.
     """
 
+    models = _fold_epoch_scores(models)
     merged: dict[str, MarketModel] = {}
     groups: dict[str, list[MarketModel]] = {}
     order: list[str] = []
@@ -805,6 +1156,15 @@ def merge_market_models(models: Sequence[MarketModel]) -> list[MarketModel]:
                 current.intelligence_source = incoming.intelligence_source
         if current.speed_tps is None and incoming.speed_tps is not None:
             current.speed_tps = incoming.speed_tps
+        for field in ("intelligence_reasoning", "intelligence_coding"):
+            if getattr(current, field) is None and getattr(incoming, field) is not None:
+                setattr(current, field, getattr(incoming, field))
+        _add_unique(current.benchmarks_used, incoming.benchmarks_used)
+        if incoming.benchmark_data_date and (
+            current.benchmark_data_date is None
+            or incoming.benchmark_data_date > current.benchmark_data_date
+        ):
+            current.benchmark_data_date = incoming.benchmark_data_date
         _add_unique(current.sources, incoming.sources)
         _add_unique(current.aliases, incoming.aliases)
         current.fetched_at = max(current.fetched_at, incoming.fetched_at)
@@ -1284,6 +1644,10 @@ class MarketService:
                     key_env=self.config.artificial_analysis_key_env,
                     transport=transport,
                 ),
+                "epoch": EpochProvider(
+                    config=self.config.epoch,
+                    transport=transport,
+                ),
             }
 
     # -- configuration -------------------------------------------------
@@ -1308,6 +1672,8 @@ class MarketService:
         return [source for source in SOURCE_ORDER if source in configured]
 
     def _ttl_for(self, source: str) -> float:
+        if source == "epoch":
+            return float(max(1, int(self.config.epoch.ttl_seconds)))
         if source == "artificial_analysis":
             return float(
                 max(
@@ -1505,6 +1871,7 @@ class MarketService:
                     warnings.append(f"{source}: skipped one malformed cached model")
         merged = merge_market_models(collected)
         merged = apply_overrides(merged, self.config.overrides)
+        merged = apply_epoch_intelligence(merged)
         merged = apply_heuristic_intelligence(merged, self.scorer, now=now)
         merged.sort(key=lambda model: model.key)
         return MarketCatalog(
@@ -1592,6 +1959,9 @@ __all__ = [
     "ALLOWED_HOSTS",
     "ARTIFICIAL_ANALYSIS_URL",
     "ArtificialAnalysisProvider",
+    "EPOCH_ATTRIBUTION",
+    "EPOCH_URL",
+    "EpochProvider",
     "MAX_RESPONSE_BYTES",
     "MarketCatalog",
     "MarketError",
@@ -1604,13 +1974,17 @@ __all__ = [
     "ModelsDevProvider",
     "OpenRouterProvider",
     "SOURCE_ORDER",
+    "apply_epoch_intelligence",
     "apply_heuristic_intelligence",
     "apply_overrides",
     "best_match",
     "blended_price",
     "canonical_model_key",
+    "fetch_bytes",
     "fetch_json",
     "filter_market_models",
+    "normalize_epoch_model_name",
+    "parse_epoch_zip",
     "is_non_model_id",
     "list_unmatched",
     "match_model",

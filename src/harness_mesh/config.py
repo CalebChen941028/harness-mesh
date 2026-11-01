@@ -183,6 +183,42 @@ class MarketOverrideConfig(BaseModel):
     reasoning: bool | None = None
 
 
+class EpochConfig(BaseModel):
+    """Epoch AI benchmark lists and the percentile reference window."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    reasoning_benchmarks: list[str] = Field(
+        default_factory=lambda: [
+            "gpqa_diamond",
+            "hle_external",
+            "arc_agi_2_external",
+            "critpt_external",
+            "otis_mock_aime_2024_2025",
+            "frontiermath_tiers_1_3_v2",
+        ]
+    )
+    coding_benchmarks: list[str] = Field(
+        default_factory=lambda: [
+            "swe_bench_verified",
+            "cursorbench_external",
+            "frontiercode_external",
+            "scicode_external",
+            "terminalbench_external",
+            "ale_bench_external",
+            "webdev_arena_external",
+            "deepswe_external",
+            "frontierswe_external",
+        ]
+    )
+    # Only models released within this many days before a benchmark's latest
+    # release date count towards that benchmark's percentile.
+    reference_window_days: int = 540
+    # An axis with fewer scored benchmarks is left empty instead of padded.
+    min_benchmarks: int = 3
+    ttl_seconds: int = 43_200
+
+
 class MarketConfig(BaseModel):
     """Settings for the read-only model market and its on-disk snapshot cache."""
 
@@ -191,7 +227,7 @@ class MarketConfig(BaseModel):
     enabled: bool = True
     ttl_seconds: int = 21_600
     sources: list[str] = Field(
-        default_factory=lambda: ["openrouter", "models_dev", "artificial_analysis"]
+        default_factory=lambda: ["openrouter", "models_dev", "epoch", "artificial_analysis"]
     )
     # Vendors whose own catalogue entry is the authoritative list price.
     # The default is empty so the list lives in the shipped example config;
@@ -203,6 +239,7 @@ class MarketConfig(BaseModel):
     stale_after_days: int = 7
     aliases: dict[str, str] = Field(default_factory=dict)
     overrides: dict[str, MarketOverrideConfig] = Field(default_factory=dict)
+    epoch: EpochConfig = Field(default_factory=EpochConfig)
 
 
 class RoutingPinConfig(BaseModel):
@@ -1013,6 +1050,7 @@ def config_to_json(config: MeshConfig) -> str:
 
 
 __all__ = [
+    "EpochConfig",
     "HarnessConfig",
     "MarketConfig",
     "MarketOverrideConfig",

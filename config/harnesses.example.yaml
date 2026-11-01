@@ -52,9 +52,10 @@ failover_priority:
 # ---------------------------------------------------------------------------
 # Model market (read-only)
 #
-# OpenRouter and models.dev need no key. Artificial Analysis adds benchmark
-# intelligence scores when ARTIFICIAL_ANALYSIS_API_KEY is present; without it
-# the router labels its own estimate as intelligence_source: heuristic.
+# OpenRouter and models.dev need no key. Epoch AI's CC BY 4.0 benchmark
+# archive also needs no key and is the default evaluation source; Artificial
+# Analysis takes precedence when ARTIFICIAL_ANALYSIS_API_KEY is present, and
+# the local heuristic is the last resort.
 # Dispatch reads only the cached snapshot, so no network call can delay a
 # ticket. Set enabled: false or export HARNESS_MESH_OFFLINE=1 to stop all
 # outbound market requests.
@@ -65,6 +66,7 @@ market:
   sources:
     - openrouter
     - models_dev
+    - epoch
     - artificial_analysis
   # models.dev lists the same model once per provider, including hundreds of
   # resale gateways with different prices. Entries fold onto one canonical
@@ -82,6 +84,32 @@ market:
     - xai
     - mistral
   artificial_analysis_key_env: ARTIFICIAL_ANALYSIS_API_KEY
+  # Epoch AI, 'Capabilities & benchmarking', https://epoch.ai/benchmarks,
+  # CC BY 4.0. Downloaded as one zip (https://epoch.ai/data/benchmark_data.zip)
+  # and refreshed every 12 hours. Each benchmark contributes a percentile
+  # computed inside the reference window; an axis with fewer than
+  # min_benchmarks scored benchmarks stays empty instead of being padded.
+  epoch:
+    ttl_seconds: 43200
+    reference_window_days: 540
+    min_benchmarks: 3
+    reasoning_benchmarks:
+      - gpqa_diamond
+      - hle_external
+      - arc_agi_2_external
+      - critpt_external
+      - otis_mock_aime_2024_2025
+      - frontiermath_tiers_1_3_v2
+    coding_benchmarks:
+      - swe_bench_verified
+      - cursorbench_external
+      - frontiercode_external
+      - scicode_external
+      - terminalbench_external
+      - ale_bench_external
+      - webdev_arena_external
+      - deepswe_external
+      - frontierswe_external
   # Map a harness model id (or glob) to a market key shown by
   # `hmesh market show --unmatched`.
   aliases: {}
