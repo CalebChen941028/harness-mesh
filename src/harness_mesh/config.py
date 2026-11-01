@@ -186,6 +186,7 @@ class MeshConfig(BaseModel):
     allowed_workspace_roots: list[str] = Field(default_factory=list)
     auto_init_repo: bool = False
     auto_approve_shared_write: bool = False
+    max_active_assignments: int = 8
     suspend_when_no_candidate: bool = True
     failover_on_error: bool = True
     failover_priority: list[str] = Field(

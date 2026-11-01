@@ -439,7 +439,16 @@ class WorkspaceManager:
         info.baseline_commit = head.stdout.strip() if head.returncode == 0 else None
         info.escaping_symlinks = self._normalize_worktree_symlinks(path)
         self._write_baseline_marker(info)
+        self._write_lineage_marker(path, task_id)
         return info
+
+    def _write_lineage_marker(self, worktree_path: Path, task_id: str) -> None:
+        marker = worktree_path / ".harness-mesh-lineage.json"
+        try:
+            marker.write_text(json.dumps({"task_id": task_id}), encoding="utf-8")
+            marker.chmod(0o444)
+        except OSError as exc:
+            logger.warning("unable to write lineage marker for %s: %s", task_id, exc)
 
     def _recreate_symlink(
         self,
@@ -581,6 +590,8 @@ class WorkspaceManager:
         return paths
 
     def _is_state_path(self, relative: str) -> bool:
+        if Path(relative).name == ".harness-mesh-lineage.json":
+            return True
         try:
             state_rel = self.state_dir.resolve().relative_to(self.workspace_root)
         except ValueError:
@@ -707,7 +718,11 @@ class WorkspaceManager:
         # ``git add -N`` records intent-to-add so that brand-new files appear in
         # the diff with their full content.  It does not stage content,
         # therefore it is safe inside an isolated worktree.
-        excludes = sensitive_git_pathspecs()
+        excludes = [
+            *sensitive_git_pathspecs(),
+            ":(exclude).harness-mesh-lineage.json",
+            ":(exclude)**/.harness-mesh-lineage.json",
+        ]
         if stage_untracked:
             self._git(["add", "-N", "--", ".", *excludes], cwd=target)
         result = self._git(
@@ -724,7 +739,17 @@ class WorkspaceManager:
             return []
         ref = base_ref or self.baseline_for_path(target) or "HEAD"
         result = self._git(
-            ["diff", "--no-ext-diff", "--name-only", ref, "--", ".", *sensitive_git_pathspecs()],
+            [
+                "diff",
+                "--no-ext-diff",
+                "--name-only",
+                ref,
+                "--",
+                ".",
+                *sensitive_git_pathspecs(),
+                ":(exclude).harness-mesh-lineage.json",
+                ":(exclude)**/.harness-mesh-lineage.json",
+            ],
             cwd=target,
         )
         if result.returncode != 0:
@@ -741,8 +766,11 @@ class WorkspaceManager:
         target = Path(path)
         ref = base_ref or self.baseline_for_path(target)
         diff = self.collect_diff(target, stage_untracked=stage_untracked, base_ref=ref)
-        raw_files = set(self.modified_files(target))
-        raw_files.update(self.diff_files(target, base_ref=ref))
+        raw_files = {
+            path
+            for path in set(self.modified_files(target)) | set(self.diff_files(target, base_ref=ref))
+            if not self._is_state_path(path)
+        }
         skipped: list[str] = []
         for path in sorted(raw_files):
             if not is_sensitive_path(path):
@@ -920,7 +948,7 @@ class WorkspaceManager:
             rel_path = Path(relative)
             if rel_path.is_absolute() or ".." in rel_path.parts:
                 raise WorkspaceError(f"refusing unsafe worktree path: {relative}")
-            if is_sensitive_path(rel_path):
+            if is_sensitive_path(rel_path) or self._is_state_path(relative):
                 continue
             src_path = source / rel_path
             dst_path = target / rel_path

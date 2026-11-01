@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 try:  # MCP v1 (the pinned API)
@@ -67,8 +68,9 @@ def _env_trace_chain(name: str = "HARNESS_MESH_TRACE_CHAIN") -> list[str] | None
     return None
 
 
-def _effective_call_depth(argument: int | None) -> int:
-    inherited = _env_int("HARNESS_MESH_CALL_DEPTH") or 0
+def _effective_call_depth(argument: int | None, inherited: int | None = None) -> int:
+    env_depth = _env_int("HARNESS_MESH_CALL_DEPTH") or 0
+    inherited = max(env_depth, int(inherited or 0))
     if argument is None:
         return inherited
     try:
@@ -78,8 +80,11 @@ def _effective_call_depth(argument: int | None) -> int:
     return max(inherited, requested)
 
 
-def _merge_trace_chain(argument: list[str] | None) -> list[str]:
-    inherited = _env_trace_chain() or []
+def _merge_trace_chain(argument: list[str] | None, inherited: list[str] | None = None) -> list[str]:
+    inherited = list(inherited or []) or (_env_trace_chain() or [])
+    for item in _env_trace_chain() or []:
+        if item not in inherited:
+            inherited.insert(0, item)
     if not argument:
         return list(inherited)
     merged = list(inherited)
@@ -90,10 +95,59 @@ def _merge_trace_chain(argument: list[str] | None) -> list[str]:
     return merged
 
 
+def _workspace_from_cwd() -> str:
+    cwd = Path.cwd().resolve()
+    parts = cwd.parts
+    for index, part in enumerate(parts):
+        if part == ".harness-mesh" and index + 1 < len(parts) and parts[index + 1] == "worktrees":
+            return str(Path(*parts[:index]))
+    return str(cwd)
+
+
+def _task_id_from_cwd(router: Any) -> str | None:
+    cwd = Path.cwd().resolve()
+    worktrees = (router.workspace.state_dir / "worktrees").resolve()
+    try:
+        relative = cwd.relative_to(worktrees)
+    except ValueError:
+        relative = None
+    if relative and relative.parts:
+        return relative.parts[0]
+    current = cwd
+    while True:
+        marker = current / ".harness-mesh-lineage.json"
+        if marker.exists():
+            try:
+                return str(json.loads(marker.read_text(encoding="utf-8")).get("task_id") or "") or None
+            except (OSError, json.JSONDecodeError):
+                return None
+        if current.parent == current:
+            return None
+        current = current.parent
+
+
+def _inherited_lineage(router: Any) -> tuple[int, list[str]]:
+    task_id = _task_id_from_cwd(router)
+    if not task_id:
+        return 0, []
+    try:
+        record = router.storage.get_task(task_id)
+    except Exception:
+        return 0, []
+    request = record.get("request")
+    depth = getattr(request, "call_depth", None)
+    if depth is None and isinstance(request, dict):
+        depth = request.get("call_depth")
+    trace = getattr(request, "trace_chain", None)
+    if trace is None and isinstance(request, dict):
+        trace = request.get("trace_chain")
+    return int(depth or 0), [str(item) for item in (trace or [])]
+
+
 def get_runtime() -> MeshRuntime:
     global _runtime
     if _runtime is None:
-        workspace = os.environ.get("HARNESS_MESH_WORKSPACE") or os.getcwd()
+        workspace = os.environ.get("HARNESS_MESH_WORKSPACE") or _workspace_from_cwd()
         _runtime = create_mesh_runtime(
             config_path=os.environ.get("HARNESS_MESH_CONFIG"),
             workspace_root=workspace,
@@ -174,6 +228,7 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
         in the same worktree.
         """
 
+        inherited_depth, inherited_trace = _inherited_lineage(router)
         request_kwargs: dict[str, Any] = {
             "target_harness": target_harness,
             "objective": objective,
@@ -195,8 +250,8 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
             "workspace_root": workspace_root or str(router.workspace_root),
             "timeout_seconds": timeout_seconds,
             "session_id": session_id,
-            "call_depth": _effective_call_depth(call_depth),
-            "trace_chain": _merge_trace_chain(trace_chain),
+            "call_depth": _effective_call_depth(call_depth, inherited_depth),
+            "trace_chain": _merge_trace_chain(trace_chain, inherited_trace),
             "checkpoint": ContinuationCheckpoint.model_validate(checkpoint) if checkpoint else None,
         }
         if max_failover_attempts is not None:
@@ -217,12 +272,13 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
         """Dispatch multiple tickets concurrently across different harnesses."""
 
         parent_task_id = os.environ.get("HARNESS_MESH_TASK_ID")
+        inherited_depth, inherited_trace = _inherited_lineage(router)
         normalized: list[dict[str, Any]] = []
         for task in tasks:
             item = dict(task)
             item.setdefault("workspace_root", str(router.workspace_root))
-            item["call_depth"] = _effective_call_depth(item.get("call_depth"))
-            item["trace_chain"] = _merge_trace_chain(item.get("trace_chain"))
+            item["call_depth"] = _effective_call_depth(item.get("call_depth"), inherited_depth)
+            item["trace_chain"] = _merge_trace_chain(item.get("trace_chain"), inherited_trace)
             if "parent_task_id" not in item and parent_task_id:
                 item["parent_task_id"] = parent_task_id
             normalized.append(item)
