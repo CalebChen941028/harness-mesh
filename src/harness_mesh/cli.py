@@ -88,6 +88,13 @@ def _trace_chain_option(raw: str | None) -> list[str] | None:
     return None
 
 
+_APPROVAL_HINT = (
+    "Note: headless runs (codex exec, agy -p) cannot prompt for MCP approval and deny the call. "
+    "Codex: -c 'mcp_servers.harness-mesh.default_tools_approval_mode=\"approve\"'. "
+    "Antigravity: add an allow rule such as mcp(harness-mesh/list_harnesses) under permissions.allow."
+)
+
+
 def _echo_install_results(results) -> None:
     for result in results:
         typer.echo(f"{result.harness:12} {result.action:12} {result.detail}")
@@ -154,6 +161,8 @@ def install(
     else:
         typer.echo("Result:")
         _echo_install_results(results)
+        if not uninstall and any(result.installed for result in results):
+            typer.echo(_APPROVAL_HINT)
     if any(result.action == "failed" for result in results):
         raise typer.Exit(code=1)
 
