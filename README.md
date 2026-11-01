@@ -243,6 +243,7 @@ Key settings:
 | `allowed_workspace_roots` | service workspace | Optional allowlist for request-level `workspace_root`; symlinks are resolved before containment checks |
 | `auto_init_repo` | `false` | Refuse a non-Git workspace unless it is explicitly enabled |
 | `auto_approve_shared_write` | `false` | Injection of approval-bypass flags when `workspace_mode=shared_write` |
+| `max_active_assignments` | `8` | Global cap on simultaneously running assignments |
 | `summary_max_chars` | `1500` | Summary returned to the controller |
 | `diff_preview_max_chars` | `4000` | Diff preview returned to the controller |
 | `max_call_depth` | `3` | Nested dispatch depth limit |
@@ -273,11 +274,12 @@ The fast suite uses mocked adapters and temporary Git repositories. `tests/test_
 
 - The MCP server and CLI require a Git workspace; startup fails from `$HOME`, `/`, or a directory without Git.
 - Request-level `workspace_root` must resolve (including symlinks) inside `allowed_workspace_roots`, which defaults to the service workspace.
-- Sensitive filenames such as `.env`, PEM/key files, `credentials*`, `.npmrc` and `.netrc` are excluded from baselines, dirty sync and copy operations.
-- Untracked symlinks are recreated only when their resolved target stays inside the source workspace; external and dangling links are skipped.
-- Approval bypass flags are suppressed for `shared_write` unless `auto_approve_shared_write: true`; the DeepSeek built-in shell drops credential-shaped environment variables.
-- Shared memory is capped at 128 characters per key, 4,000 per entry and 6,000 rendered characters; auto-recorded summaries render in a separate unverified block.
-- Mesh Git commands run with hooks disabled and reject apply when `.git/config` or `.git/hooks` changes after task start.
+- Sensitive filtering covers `.env` and real credential/key files, plus `.ssh`, `.aws`, `.gnupg`, and `.git` path segments. `.env.example`, `.env.sample`, `.env.template`, `.env.dist`, ordinary `credentials_service.py`-style source, and public `*.pub` keys stay visible. Every skipped path is reported in `skipped_sensitive` and warnings; Mesh no longer edits the user's `.git/info/exclude`.
+- Worktree symlinks are rewritten as relative links into the worktree. Escaping or dangling links are reported; apply rejects symlink diffs that leave the target root.
+- Approval bypass flags are suppressed for `shared_write` unless `auto_approve_shared_write: true`; the DeepSeek built-in shell drops credential-shaped environment variables, cloud key names, SSH agent sockets, and URLs containing passwords.
+- Shared memory is capped at 128 characters per key, 4,000 per entry and 6,000 rendered characters. Only `controller` entries render as verified; worker and auto entries render in a separate unverified block. Author validation checks the name only.
+- Mesh Git commands disable hooks, fsmonitor, pager, external diff and protocol.ext, record a per-task metadata guard once, and reject apply or abort the ticket when metadata changes after task start.
+- MCP call depth can be recovered from the worktree cwd or lineage marker when inherited environment variables are unavailable; `max_active_assignments` caps running assignments.
 
 ## Trademarks and independence
 

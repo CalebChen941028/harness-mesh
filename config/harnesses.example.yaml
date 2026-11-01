@@ -24,6 +24,7 @@ summary_max_chars: 1500
 diff_preview_max_chars: 4000
 default_timeout_seconds: 1800
 max_call_depth: 3
+max_active_assignments: 8
 max_failover_attempts: 4
 transient_retries: 1
 quota_cooldown_seconds: 300

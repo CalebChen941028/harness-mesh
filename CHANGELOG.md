@@ -2,27 +2,29 @@
 
 ## 0.3.1 — 2026-11-01
 
-Security hardening release addressing the independent audit.
+Security hardening release addressing two independent audits.
 
 ### Added
 
-- `allowed_workspace_roots` config, symlink-resolved containment checks for dispatch/apply, and refusal to start the MCP/CLI service from `$HOME`, `/`, or a non-Git directory.
-- Sensitive-file exclusion in `.git/info/exclude` and in dirty-sync/copy paths; `auto_init_repo` now defaults to false.
-- `auto_approve_shared_write` config, default false; `shared_write` no longer inherits approval bypass implicitly.
-- `hmesh doctor` checks registered command paths and `python -m harness_mesh.mcp_server --help`.
-- `hmesh install --yes` for non-interactive use; without it, a non-interactive install is refused after printing the plan.
-- Dependabot configuration for pip and GitHub Actions, plus a non-blocking `pip-audit` CI step.
+- `allowed_workspace_roots` with symlink-resolved containment checks, plus service-start validation that rejects `$HOME`, `/`, and, unless `auto_init_repo` is enabled, non-Git directories.
+- `auto_init_repo` (default false), `auto_approve_shared_write` (default false) and `max_active_assignments` (default 8).
+- `skipped_sensitive` and `warnings` on change/apply/task results, so filtered files are visible to CLI and MCP clients.
+- Context provenance: a `source` column (`controller`, `worker`, `auto`) with an in-place migration for existing databases.
+- `hmesh doctor` checks registered command paths and `python -m harness_mesh.mcp_server --help`; `hmesh install --yes` supports non-interactive installs after printing the plan.
+- Dependabot for pip and GitHub Actions, plus a non-blocking `pip-audit` CI step.
 
 ### Changed
 
-- Workspace roots are validated before any directory creation; active task state is rejected when the root escapes the allowlist.
-- Baselines and worktrees skip `.env`, key material, credential files and similar names; untracked symlinks are recreated only when their target stays inside the workspace.
-- MCP call depth uses `max(argument, inherited)` and trace chains are merged, so a worker cannot reset recursion state.
-- DeepSeek Harness uses `workspace-write` when `auto_approve` is false; built-in shell commands drop credential-shaped environment variables.
-- Mesh Git commands disable repository hooks; `.git/config` and `.git/hooks` hashes are compared before apply.
-- Shared memory keys and content are capped, authors must be configured harness names or `controller`, delimiters are escaped, and auto-recorded summaries move to a separate unverified block.
+- Sensitive filtering uses narrowed filename rules plus Git pathspec excludes; `.env.example`/`.env.sample`/`.env.template`/`.env.dist` and ordinary `credentials*.py` source files remain visible. `.ssh`, `.aws`, `.gnupg`, and `.git` path segments are always treated as sensitive. Mesh no longer writes sensitive patterns into the user's `.git/info/exclude`.
+- Worktree symlinks are rewritten as relative links pointing inside the destination worktree. Tracked absolute links are normalised, escaping/dangling links are reported as warnings, and apply rejects symlink diffs that leave the target root.
+- Git metadata guards are recorded once per task, survive worktree reuse, include `.git/info/attributes`, and abort the ticket with `git_metadata_tampered` before any further assignment. Mesh Git commands disable hooks, fsmonitor, pager, external diff and protocol.ext.
+- Recursion state can be recovered from the worktree cwd/lineage marker when MCP cannot rely on inherited environment variables; active assignments are globally capped.
+- DeepSeek Harness uses `workspace-write` when `auto_approve` is false. `DSH_PERMISSION_MODE` accepts `read-only`, `workspace-write`, and `danger-full-access` (verified from the installed DSH help/package strings). The built-in shell drops more credential-shaped variables, exact cloud keys, SSH agent sockets, and URLs containing passwords.
+- Workspace validation is applied consistently by the CLI, MCP runtime, installer plan, and doctor checks; missing Git is reported as an actionable error.
+- DSH patches are validated before writing, written atomically, and rolled back to the exact pre-write content on failure.
+- Context entries now carry provenance; only `source=controller` entries render as verified memory. Worker and auto entries render in `<project_unverified_memory>`. Authors are checked for a configured harness name or `controller` only; that check does not prove provenance. Delimiter escaping is case-insensitive and whitespace-tolerant.
 - MCP `apply_task_patch` supports only `patch` and `merge`; CLI copy requires `--force-copy`. Apply requires a completed ticket and runs a patch preflight.
-- Installer subprocesses use `stdin=DEVNULL`, restore the previous registration when add fails, write DSH patches atomically with rollback, and use a consistent Claude `user` scope.
+- Installer subprocesses use `stdin=DEVNULL`, restore the previous registration when add fails, use a consistent Claude `user` scope, and confirm non-interactive changes with `--yes`.
 - Dependency upper bounds added for pydantic, PyYAML, httpx and Typer; MCP module documentation corrected.
 
 ## 0.3.0 — 2026-11-01
