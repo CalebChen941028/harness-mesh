@@ -82,6 +82,9 @@ def _invoke(workspace: Path, *args: str):
         ["--workspace", str(workspace), *args],
         env={
             "HOME": str(workspace.parent / "home"),
+            # Pin the XDG location too: CI images export XDG_CONFIG_HOME, which
+            # would otherwise move the hint path away from the HOME default.
+            "XDG_CONFIG_HOME": str(workspace.parent / "home" / ".config"),
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HARNESS_MESH_DISABLE_SYSTEM_BINARIES": "1",
         },

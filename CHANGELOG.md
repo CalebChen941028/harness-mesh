@@ -31,7 +31,7 @@ Security hardening release following an independent audit of 0.4.1. No new harne
 ### Packaging, CI and documentation
 
 - `MANIFEST.in` now ships exactly `config/harnesses.example.yaml` and the published docs instead of any `config/*.yaml`; a developer's local config can no longer leak into an sdist.
-- CI actions are pinned by commit SHA (`actions/checkout`, `actions/setup-python`), and `pip-audit` is version-pinned and blocking instead of advisory.
+- CI actions are pinned by commit SHA (`actions/checkout`, `actions/setup-python`), and `pip-audit` is version-pinned and blocking. The audit runs in a dedicated virtualenv so preinstalled runner packages cannot fail or mask the project's own dependency set.
 - The independent audit is published at `docs/security/2026-11-audit.md` with code locations and remediation. Raw credential values, local paths and ready-to-run attack payloads are not included; internal research and planning notes were removed from the repository.
 - `docs/README.md` indexes the published documentation.
 

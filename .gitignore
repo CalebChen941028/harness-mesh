@@ -1,4 +1,5 @@
 .venv/
+.audit-venv/
 .harness-mesh/
 .claude/
 config/harnesses.yaml

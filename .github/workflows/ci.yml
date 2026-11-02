@@ -35,5 +35,11 @@ jobs:
         run: pytest -q
       - name: Audit dependencies
         run: |
-          python -m pip install "pip-audit==2.10.1"
-          pip-audit
+          # Audit the project's own dependency set in a clean venv.  The runner
+          # image ships preinstalled packages (for example an old setuptools)
+          # that are not part of this project and must not fail the gate.
+          python -m venv .audit-venv
+          .audit-venv/bin/python -m pip install --quiet --upgrade pip setuptools wheel
+          .audit-venv/bin/python -m pip install --quiet -e .
+          .audit-venv/bin/python -m pip install --quiet "pip-audit==2.10.1"
+          .audit-venv/bin/python -m pip_audit
