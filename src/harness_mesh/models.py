@@ -9,12 +9,24 @@ harnesses and models while the worktree and the ticket identity stay stable.
 from __future__ import annotations
 
 import os
+import re
 import time
 import uuid
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+_PUBLIC_PROVIDER_RE = re.compile(r"^[A-Za-z0-9_.:/-]{1,64}$")
+# Even a short provider label must not be a credential shape (a truncated JWT
+# or API key can still be <= 64 characters).
+_CREDENTIAL_PROVIDER_RE = re.compile(
+    r"(?:^eyJ[A-Za-z0-9_-]{8,}\.|^sk-|^ghp_|^gho_|^ghu_|^ghs_|^ghr_|^github_pat_|"
+    r"^[0-9a-f]{16,}\.|^AKIA|^ASIA|^AIza|^hf_|^npm_|BEGIN [A-Z0-9 ]*PRIVATE KEY)",
+    re.IGNORECASE,
+)
+_TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_RESERVED_TASK_IDS = frozenset({".meta", "worktrees", "tmp", "mcp", "git-guards"})
 
 
 class _StrEnum(str, Enum):
@@ -117,6 +129,36 @@ class DiscoveredModel(_Model):
     @property
     def is_placeholder(self) -> bool:
         return self.model_id == "<cli_active_default>"
+
+    def public_view(self) -> dict[str, Any]:
+        """Serialise only the fields safe to expose to a caller.
+
+        Provider strings can come from another application's configuration
+        file or a model catalogue, so anything that is not a short enum-shaped
+        token falls back to the harness name.  Internal bookkeeping fields
+        (``discovered_at``) and the raw ``harness`` column stay out.
+        """
+
+        provider = str(self.provider or "")
+        if (
+            not _PUBLIC_PROVIDER_RE.fullmatch(provider)
+            or _CREDENTIAL_PROVIDER_RE.search(provider)
+        ):
+            provider = self.harness
+        return {
+            "model_id": self.model_id,
+            "provider": provider,
+            "authorized": self.authorized,
+            "capability_score": self.capability_score,
+            "intelligence": self.intelligence,
+            "intelligence_source": self.intelligence_source,
+            "blended_price": self.blended_price,
+            "assigned_tiers": list(self.assigned_tiers),
+            "source": self.source,
+            "context_window": self.context_window,
+            "supports_reasoning": self.supports_reasoning,
+            "is_active_default": self.is_active_default,
+        }
 
 
 class SkillSpec(_Model):
@@ -244,6 +286,22 @@ class TaskRequest(_Model):
     trace_chain: list[str] = Field(default_factory=list)
     checkpoint: ContinuationCheckpoint | None = None
     parent_task_id: str | None = None
+
+    @field_validator("task_id")
+    @classmethod
+    def _validate_task_id(cls, value: str) -> str:
+        text = str(value or "")
+        if not _TASK_ID_RE.fullmatch(text):
+            raise ValueError(
+                "task_id must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+            )
+        if ".." in text:
+            raise ValueError("task_id must not contain '..'")
+        if text.endswith("."):
+            raise ValueError("task_id must not end with '.'")
+        if text in _RESERVED_TASK_IDS:
+            raise ValueError(f"task_id {text!r} is reserved for mesh state")
+        return text
 
     @field_validator("target_harness")
     @classmethod

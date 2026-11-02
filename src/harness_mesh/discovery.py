@@ -95,6 +95,63 @@ _AUTH_KEY_HINTS = {
     "endpoint",
 }
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
+_PROVIDER_NAME = re.compile(r"^[A-Za-z0-9_.:/-]+$")
+_MAX_PROVIDER_NAME = 64
+_OFFLINE_VALUES = frozenset({"1", "true", "yes", "on"})
+# A provider label that looks like a credential must never enter a model
+# object: some harness configs store a token in a field meant to be a provider
+# id.  ``eyJ`` prefixes are JWTs; the other entries are well-known key shapes.
+_CREDENTIAL_SHAPE = re.compile(
+    r"(?:^eyJ[A-Za-z0-9_-]{8,}\.|^sk-|^ghp_|^gho_|^ghu_|^ghs_|^ghr_|^github_pat_|"
+    r"^[0-9a-f]{16,}\.|^AKIA|^ASIA|^AIza|^hf_|^npm_|BEGIN [A-Z0-9 ]*PRIVATE KEY)",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_remote_url(value: Any) -> str | None:
+    """Return ``value`` when it is a safe API base URL, else ``None``.
+
+    Only ``https`` is accepted; plain ``http`` is limited to loopback hosts so
+    a local gateway keeps working.  Userinfo, missing hosts and other schemes
+    are rejected.  This is the single gate used for both the configured
+    ``base_url`` and the final request URL built from ``models_endpoint``.
+    """
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        url = httpx.URL(text)
+    except Exception:  # malformed URL
+        return None
+    if url.scheme not in _ALLOWED_URL_SCHEMES:
+        return None
+    if url.username or url.password:
+        return None
+    host = (url.host or "").lower()
+    if not host:
+        return None
+    if url.scheme == "http" and host not in _LOOPBACK_HOSTS:
+        return None
+    return text
+
+
+def _safe_provider_name(value: Any, fallback: str) -> str:
+    """Accept a short provider label; dictionaries and long values fall back."""
+
+    if isinstance(value, str):
+        text = value.strip()
+        if (
+            0 < len(text) <= _MAX_PROVIDER_NAME
+            and _PROVIDER_NAME.match(text)
+            and _CREDENTIAL_SHAPE.search(text) is None
+        ):
+            return text
+    return fallback
+
+
 _HIGH_FEATURES: list[tuple[str, float]] = [
     ("gpt-6", 20.0),
     ("gpt-5", 18.0),
@@ -417,7 +474,9 @@ class ModelDiscoveryEngine:
                 continue
             provider = "openai"
             if isinstance(data, dict):
-                provider = str(data.get("model_provider") or data.get("provider") or "openai")
+                provider = _safe_provider_name(
+                    data.get("model_provider") or data.get("provider"), "openai"
+                )
             for model_id, role_hint in self._extract_model_entries(data):
                 results.append(
                     self._make_model("codex", model_id, "local_config", provider=provider, role_hint=role_hint)
@@ -486,7 +545,7 @@ class ModelDiscoveryEngine:
                 continue
             provider = "zcode"
             if isinstance(data, dict):
-                provider = str(data.get("provider") or "zcode")
+                provider = _safe_provider_name(data.get("provider"), "zcode")
             for model_id, role_hint in self._extract_model_entries(data):
                 results.append(
                     self._make_model("zcode", model_id, "local_config", provider=provider, role_hint=role_hint)
@@ -535,6 +594,43 @@ class ModelDiscoveryEngine:
             if candidate not in paths:
                 paths.append(candidate)
         return paths
+
+    def _is_user_level_config_path(self, path: Path, root: Path) -> bool:
+        """True when ``path`` lives under the user's home (never the workspace).
+
+        Authentication material (``base_url``/``api_key``) may only come from
+        environment variables and user-owned files.  A workspace file is
+        repository-controlled data and must not redirect credentials.
+        """
+
+        try:
+            resolved = path.expanduser().resolve()
+        except OSError:
+            return False
+        try:
+            workspace = Path(root).expanduser().resolve()
+            resolved.relative_to(workspace)
+            return False
+        except ValueError:
+            pass
+        except OSError:
+            workspace = Path(root)
+        allowed_roots = [self.home_dir]
+        try:
+            allowed_roots.append(self._dsh_home().resolve())
+        except OSError:
+            pass
+        for allowed in allowed_roots:
+            try:
+                resolved.relative_to(allowed)
+                return True
+            except ValueError:
+                continue
+        return False
+
+    def _offline(self) -> bool:
+        value = self.env.get("HARNESS_MESH_OFFLINE")
+        return str(value).strip().lower() in _OFFLINE_VALUES
 
     def _deepseek_config_paths(self, cfg: HarnessConfig, root: Path) -> list[Path]:
         paths = self._config_paths(cfg, root)
@@ -732,19 +828,31 @@ class ModelDiscoveryEngine:
     # layer 2: live model endpoints
     # ------------------------------------------------------------------
     def _resolve_auth(self, harness: str, cfg: HarnessConfig, root: Path) -> dict[str, str | None]:
+        """Resolve the API base URL and key from trusted sources only.
+
+        Priority: environment variables, then user-level config files
+        (``~/.claude.json`` and friends), then the configured default URL.
+        Workspace-rendered ``config_files`` never contribute credentials, and
+        the selected ``base_url`` must pass :func:`_sanitize_remote_url`.
+        """
+
         base_url = self._first_env(cfg.base_url_env)
         api_key = self._first_env(cfg.api_key_env)
-        config_values = self._collect_config_auth(cfg, root)
-        if not base_url:
-            base_url = config_values.get("base_url")
-        if not api_key:
-            api_key = config_values.get("api_key")
+        if not base_url or not api_key:
+            config_values = self._collect_config_auth(cfg, root)
+            if not base_url:
+                base_url = config_values.get("base_url")
+            if not api_key:
+                api_key = config_values.get("api_key")
         if not base_url:
             base_url = cfg.default_base_url or None
         if cfg.auth_style == "gemini":
             if not api_key:
                 api_key = self.env.get("GOOGLE_API_KEY") or self.env.get("GEMINI_API_KEY")
-        return {"base_url": base_url, "api_key": api_key}
+        return {
+            "base_url": _sanitize_remote_url(base_url) if base_url else None,
+            "api_key": str(api_key).strip() if api_key else None,
+        }
 
     def _first_env(self, names: Iterable[str]) -> str | None:
         for name in names:
@@ -756,6 +864,8 @@ class ModelDiscoveryEngine:
     def _collect_config_auth(self, cfg: HarnessConfig, root: Path) -> dict[str, str | None]:
         values: dict[str, str | None] = {"base_url": None, "api_key": None}
         for path in self._config_paths(cfg, root):
+            if not self._is_user_level_config_path(path, root):
+                continue
             data = self._read_config_file(path)
             if data is None:
                 continue
@@ -789,6 +899,10 @@ class ModelDiscoveryEngine:
     async def _discover_from_api(
         self, harness: str, cfg: HarnessConfig, root: Path
     ) -> list[DiscoveredModel]:
+        injected_transport = self.http_client is not None or self.http_transport is not None
+        if self._offline() and not injected_transport:
+            return []
+
         auth = self._resolve_auth(harness, cfg, root)
         base_url = auth.get("base_url")
         api_key = auth.get("api_key")
@@ -796,6 +910,10 @@ class ModelDiscoveryEngine:
             return []
         endpoint = cfg.models_endpoint or "/v1/models"
         url = self._join_endpoint(base_url, endpoint)
+        request_url = _sanitize_remote_url(url)
+        if request_url is None:
+            self._record_error(harness, "api_models: refused an unsafe models endpoint")
+            return []
         headers: dict[str, str] = {}
         params: dict[str, str] = {}
         if cfg.auth_style == "anthropic":
@@ -813,11 +931,18 @@ class ModelDiscoveryEngine:
             client = httpx.AsyncClient(
                 transport=self.http_transport,
                 timeout=httpx.Timeout(12.0),
-                follow_redirects=True,
+                follow_redirects=False,
+                trust_env=False,
             )
             created_client = True
         try:
-            response = await client.get(url, headers=headers, params=params)
+            response = await client.get(request_url, headers=headers, params=params)
+            if 300 <= response.status_code < 400:
+                location = response.headers.get("location", "")
+                self._record_error(
+                    harness, f"api_models: refused redirect to {str(location)[:200]}"
+                )
+                return []
             if response.status_code >= 400:
                 self._record_error(harness, f"api_models HTTP {response.status_code}: {response.text[:300]}")
                 return []

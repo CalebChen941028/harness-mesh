@@ -4,6 +4,8 @@
 files.  Read tools are safe to approve by default; dispatch tools create tickets
 inside an isolated worktree; write tools change the primary workspace or shared
 state and stay manual unless the user explicitly asks for ``all``.
+``apply_task_patch`` and ``install_integration`` are always manual: even
+``--approve all`` must not pre-approve them (see ``ALWAYS_MANUAL``).
 """
 
 from __future__ import annotations
@@ -32,6 +34,12 @@ TOOL_APPROVAL_CLASSES: dict[str, str] = {
     "install_integration": "write",
 }
 
+#: Write tools that always require an interactive human decision.  Even
+#: ``--approve all`` does not pre-approve them: applying a worktree patch and
+#: rewriting another application's global configuration are the two operations
+#: a prompt-injected controller must never be able to trigger unattended.
+ALWAYS_MANUAL: frozenset[str] = frozenset({"apply_task_patch", "install_integration"})
+
 _LEVEL_CLASSES: dict[str, frozenset[str]] = {
     "read": frozenset({"read"}),
     "dispatch": frozenset({"read", "dispatch"}),
@@ -54,11 +62,12 @@ def tools_for_level(level: str) -> list[str]:
             + ", ".join(APPROVAL_LEVELS)
         )
     if classes == _LEVEL_CLASSES["all"]:
-        return list(TOOL_NAMES)
+        return [name for name in TOOL_NAMES if name not in ALWAYS_MANUAL]
     return [name for name in TOOL_NAMES if TOOL_APPROVAL_CLASSES[name] in classes]
 
 
 __all__ = [
+    "ALWAYS_MANUAL",
     "APPROVAL_LEVELS",
     "DEFAULT_APPROVAL_LEVEL",
     "TOOL_APPROVAL_CLASSES",

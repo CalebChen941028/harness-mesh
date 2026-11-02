@@ -60,6 +60,12 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+# Bump when a one-off ledger maintenance pass (checkpoint + vacuum) is needed.
+# It is stored in ``PRAGMA user_version`` and retried on every open until the
+# pass succeeds, so a concurrently running hmesh process cannot hide it.
+LEDGER_MAINTENANCE_VERSION = 1
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS discovered_models (
     harness TEXT NOT NULL,
@@ -192,6 +198,12 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
 class StateStore:
     """Thread-safe SQLite ledger used by the router, quota guardian and MCP."""
 
+    # The ledger can contain transcripts, diffs and legacy credential material
+    # from older releases, so the state directory and its SQLite files are
+    # restricted to the owning user.
+    STATE_DIR_MODE = 0o700
+    STATE_FILE_MODE = 0o600
+
     def __init__(self, db_path: str | Path, *, read_only: bool = False):
         self.path = Path(db_path).expanduser()
         self.read_only = read_only
@@ -206,15 +218,76 @@ class StateStore:
             )
             self._conn.row_factory = sqlite3.Row
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.path), check_same_thread=False, timeout=30)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._prepare_state_directory()
+        # Tighten the umask while SQLite creates the database and its WAL/SHM
+        # side files, then restore the process default.
+        previous_umask = os.umask(0o077)
+        try:
+            self._conn = sqlite3.connect(str(self.path), check_same_thread=False, timeout=30)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA foreign_keys=ON")
+            with self._lock:
+                self._conn.executescript(_SCHEMA)
+                self._migrate()
+                self._conn.commit()
+        finally:
+            os.umask(previous_umask)
+        self._harden_state_files()
         with self._lock:
-            self._conn.executescript(_SCHEMA)
-            self._migrate()
-            self._conn.commit()
+            repaired = self.sanitize_legacy_secrets()
+            maintenance_pending = self._ledger_maintenance_version() < LEDGER_MAINTENANCE_VERSION
+        if repaired or maintenance_pending:
+            # A plain UPDATE leaves the old credential text in WAL frames and
+            # freelist pages.  Older ledgers also need this pass once even when
+            # the rows were already rewritten by an intermediate release.  If
+            # another hmesh process holds the database the marker stays behind,
+            # so the next open retries instead of silently skipping the purge.
+            self._purge_legacy_secret_pages()
+
+    def _ledger_maintenance_version(self) -> int:
+        row = self._conn.execute("PRAGMA user_version").fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def _purge_legacy_secret_pages(self) -> None:
+        """Best-effort removal of pre-repair pages from the ledger files."""
+
+        with self._lock:
+            try:
+                checkpoint = self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                if checkpoint is not None and int(checkpoint[0]) != 0:
+                    return
+                self._conn.execute("VACUUM")
+                self._conn.execute(f"PRAGMA user_version={LEDGER_MAINTENANCE_VERSION}")
+                self._conn.commit()
+            except sqlite3.DatabaseError:
+                # Another hmesh process may hold the database; the rewritten
+                # rows are already committed, so retry on the next open.
+                return
+        self._harden_state_files()
+
+    def _prepare_state_directory(self) -> None:
+        """Create/tighten the state directory before SQLite opens the ledger."""
+
+        parent = self.path.parent
+        parent.mkdir(parents=True, exist_ok=True, mode=self.STATE_DIR_MODE)
+        try:
+            os.chmod(parent, self.STATE_DIR_MODE)
+        except OSError:
+            # Filesystems without POSIX modes (FAT/exotic mounts) must not
+            # stop the service; the state directory simply keeps its mode.
+            pass
+
+    def _harden_state_files(self) -> None:
+        """Apply 0600 to an existing database and its WAL/SHM side files."""
+
+        for suffix in ("", "-wal", "-shm"):
+            candidate = Path(f"{self.path}{suffix}")
+            try:
+                if candidate.exists():
+                    os.chmod(candidate, self.STATE_FILE_MODE)
+            except OSError:
+                continue
 
     def _migrate(self) -> None:
         columns = {
@@ -368,6 +441,25 @@ class StateStore:
             )
             self._conn.commit()
             return cursor.rowcount > 0
+
+    def sanitize_legacy_secrets(self) -> int:
+        """Rewrite legacy credential blobs in ``discovered_models.provider``.
+
+        Releases before 0.4.2 could store a whole provider registry (including
+        ``apiKey`` values) in the ``provider`` column.  A provider is meant to
+        be a short enum, so anything longer than 64 characters or starting
+        with an object opener is replaced with the harness name.  Returns the
+        number of repaired rows.
+        """
+
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE discovered_models SET provider = harness, updated_at = ? "
+                "WHERE length(provider) > 64 OR substr(provider, 1, 1) = '{'",
+                (time.time(),),
+            )
+            self._conn.commit()
+            return int(cursor.rowcount or 0)
 
     def set_model_tiers(self, harness: str, tiers: dict[str, list[str]]) -> None:
         now = time.time()
@@ -880,6 +972,35 @@ class StateStore:
         live = 0
         stale: list[str] = []
         for record in self.list_running_assignments():
+            if record.pid is None or _pid_alive(record.pid):
+                live += 1
+            else:
+                stale.append(record.assignment_id)
+        for assignment_id in stale:
+            self.update_assignment(
+                assignment_id,
+                status="ended_error",
+                ended_at=utc_now(),
+                error_reason="stale",
+            )
+        return live
+
+    def count_running_assignments_for_task(self, task_id: str) -> int:
+        """Count live assignments that still own one ticket.
+
+        The router uses this before creating a worktree so two dispatches of
+        the same ``task_id`` cannot race each other inside the same ledger.
+        A row whose process no longer exists is stale and is closed here, so a
+        crash cannot block a ticket id forever.  Rows without a pid predate the
+        column and count as live because their owner cannot be proven dead.
+        """
+
+        wanted = str(task_id)
+        live = 0
+        stale: list[str] = []
+        for record in self.list_running_assignments():
+            if str(record.task_id) != wanted:
+                continue
             if record.pid is None or _pid_alive(record.pid):
                 live += 1
             else:

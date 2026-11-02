@@ -77,6 +77,7 @@ async def test_project_instructions_blackboard_and_previews_are_injected(tmp_pat
             "TaskResult.status is the public contract.",
             category="api_contract",
             author_harness="codex",
+            source="controller",
         )
         request = TaskRequest(
             task_id="task-context",

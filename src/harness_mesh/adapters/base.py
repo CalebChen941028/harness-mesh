@@ -330,6 +330,17 @@ class BaseHarnessAdapter:
         return args
 
     def _build_env(self, call: AdapterCall) -> dict[str, str]:
+        """Build the child process environment.
+
+        The full parent environment is inherited on purpose: real harness
+        CLIs need their own login, session and proxy state to work.  Credential
+        scrubbing is *not* applied here; it belongs to the built-in runtime's
+        shell tool (``security.scrub_subprocess_env``, used by the DeepSeek
+        adapter).  Adding blanket scrubbing here would break authenticated
+        harnesses without closing the trust boundary, which is enforced at the
+        configuration layer instead.
+        """
+
         env = dict(self.env)
         env.update(
             {

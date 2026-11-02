@@ -333,6 +333,7 @@ async def fetch_bytes(
         timeout=REQUEST_TIMEOUT_SECONDS,
         follow_redirects=False,
         headers=request_headers,
+        trust_env=False,
     ) as client:
         for _redirect in range(MAX_REDIRECTS + 1):
             async with client.stream("GET", current) as response:
@@ -1912,7 +1913,32 @@ class MarketService:
                 if hasattr(provider, "request_budget"):
                     provider.request_budget = budget  # type: ignore[attr-defined]
             try:
-                models = await provider.fetch()
+                models = await asyncio.wait_for(
+                    provider.fetch(),
+                    timeout=float(self.config.total_timeout_seconds),
+                )
+            except asyncio.TimeoutError:
+                self._failed_sources.add(source)
+                message = (
+                    f"{source}: fetch exceeded the "
+                    f"{float(self.config.total_timeout_seconds):g}s total timeout"
+                )
+                warnings.append(message)
+                if snapshot is not None:
+                    statuses.append(
+                        MarketSourceStatus(
+                            source=source,
+                            status="stale",
+                            models=_snapshot_model_count(snapshot),
+                            fetched_at=snapshot["fetched_at"],
+                            error=message,
+                        )
+                    )
+                else:
+                    statuses.append(
+                        MarketSourceStatus(source=source, status="failed", error=message)
+                    )
+                continue
             except Exception as exc:
                 self._failed_sources.add(source)
                 message = f"{source}: {exc}"

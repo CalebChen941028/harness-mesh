@@ -66,7 +66,7 @@ def test_install_approve_read_writes_nine_rules(tmp_path):
     assert len([entry for entry in allow if entry.startswith("mcp__harness-mesh__")]) == 11
 
 
-def test_install_approve_all_writes_eighteen_rules_and_json(tmp_path):
+def test_install_approve_all_writes_sixteen_rules_and_json(tmp_path):
     result = _invoke(
         tmp_path,
         "install",
@@ -82,9 +82,12 @@ def test_install_approve_all_writes_eighteen_rules_and_json(tmp_path):
     approval = payload[0]["approvals"]
     assert approval["level"] == "all"
     assert approval["status"] == "applied"
-    assert len(approval["tools"]) == 18
+    # "all" never pre-approves apply_task_patch or install_integration.
+    assert len(approval["tools"]) == 16
+    assert "apply_task_patch" not in approval["tools"]
+    assert "install_integration" not in approval["tools"]
     assert approval["files"] == [str(tmp_path / "home" / ".claude" / "settings.json")]
-    assert len([e for e in _claude_allow(tmp_path / "home") if e.startswith("mcp__harness-mesh__")]) == 18
+    assert len([e for e in _claude_allow(tmp_path / "home") if e.startswith("mcp__harness-mesh__")]) == 16
 
 
 def test_install_approve_none_clears_previous_rules(tmp_path):

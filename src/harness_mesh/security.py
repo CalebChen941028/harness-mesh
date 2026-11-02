@@ -6,7 +6,7 @@ import fnmatch
 import re
 import subprocess
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 
 SENSITIVE_FILE_PATTERNS: tuple[str, ...] = (
     ".env",
@@ -67,6 +67,28 @@ def is_sensitive_path(path: str | Path) -> bool:
     if any(part.lower() in SENSITIVE_DIR_SEGMENTS for part in parts):
         return True
     return is_sensitive_name(Path(path).name)
+
+
+def filter_sensitive_paths(paths: Iterable[str | Path]) -> tuple[list[str], list[str]]:
+    """Split changed paths into ``(visible, skipped)``.
+
+    ``visible`` keeps the input order (deduplicated); ``skipped`` is sorted and
+    deduplicated so callers can report exactly which files a diff excluded.
+    """
+
+    visible: list[str] = []
+    skipped: set[str] = set()
+    seen: set[str] = set()
+    for item in paths:
+        path = str(item)
+        if is_sensitive_path(path):
+            skipped.add(path)
+            continue
+        if path in seen:
+            continue
+        seen.add(path)
+        visible.append(path)
+    return visible, sorted(skipped)
 
 
 def sensitive_git_pathspecs() -> list[str]:
@@ -182,7 +204,16 @@ _SENSITIVE_ENV_EXACT = {
 _URL_WITH_PASSWORD = re.compile(r"://[^/@\s:]+:[^/@\s]+@")
 
 
-def scrub_subprocess_env(env: dict[str, str]) -> dict[str, str]:
+def is_sensitive_env_name(name: str) -> bool:
+    """True when an environment variable name marks a credential."""
+
+    upper = str(name).upper()
+    if upper in _SENSITIVE_ENV_EXACT:
+        return True
+    return any(marker in upper for marker in _SENSITIVE_ENV_MARKERS)
+
+
+def scrub_subprocess_env(env: Mapping[str, str]) -> dict[str, str]:
     """Drop credential-shaped variables while keeping ordinary process state."""
 
     cleaned: dict[str, str] = {}
@@ -191,10 +222,7 @@ def scrub_subprocess_env(env: dict[str, str]) -> dict[str, str]:
         if name.startswith("HARNESS_MESH_"):
             cleaned[name] = str(value)
             continue
-        upper = name.upper()
-        if upper in _SENSITIVE_ENV_EXACT:
-            continue
-        if any(marker in upper for marker in _SENSITIVE_ENV_MARKERS):
+        if is_sensitive_env_name(name):
             continue
         if _URL_WITH_PASSWORD.search(str(value)):
             continue
@@ -202,13 +230,114 @@ def scrub_subprocess_env(env: dict[str, str]) -> dict[str, str]:
     return cleaned
 
 
+# ---------------------------------------------------------------------------
+# credential redaction for text that may be persisted or shown to a caller
+# ---------------------------------------------------------------------------
+REDACTED = "***"
+
+_OPENAI_STYLE = re.compile(r"(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{16,}")
+_GITHUB_TOKEN = re.compile(r"(?<![A-Za-z0-9_-])(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}")
+_GITHUB_PAT = re.compile(r"github_pat_[A-Za-z0-9_]{22,}")
+_SLACK_TOKEN = re.compile(r"(?<![A-Za-z0-9_-])xox[baprs]-[A-Za-z0-9-]{10,}")
+_AWS_AKID = re.compile(r"(?<![A-Za-z0-9_-])(?:AKIA|ASIA)[0-9A-Z]{16}")
+_GOOGLE_API_KEY = re.compile(r"(?<![A-Za-z0-9_-])AIza[0-9A-Za-z_-]{35}")
+_HUGGINGFACE_TOKEN = re.compile(r"(?<![A-Za-z0-9_-])hf_[A-Za-z0-9]{30,}")
+_NPM_TOKEN = re.compile(r"(?<![A-Za-z0-9_-])npm_[A-Za-z0-9]{30,}")
+_JWT = re.compile(
+    r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+)
+_PEM_PRIVATE_KEY = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)",
+    re.DOTALL,
+)
+_QUOTED_ASSIGNMENT = re.compile(
+    r"(?i)(\b(?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|client[_-]?secret)"
+    r"\b[\"']?\s*[:=]\s*[\"'])([^\"'\s]{8,})([\"'])"
+)
+_BARE_ASSIGNMENT = re.compile(
+    r"(?i)(\b(?:api[_-]?key|apikey)\b\s*[:=]\s*)"
+    r"(?=[A-Za-z0-9._~+/=-]*[0-9])[A-Za-z0-9._~+/=-]{16,}(\b)"
+)
+_AUTHORIZATION = re.compile(
+    r"(?i)(\bAuthorization\b[\"']?\s*[:=]\s*[\"']?)(?:Bearer\s+)?([A-Za-z0-9._~+/=-]{8,})"
+)
+_URL_PASSWORD = re.compile(r"(://[^/:\s@'\"]+:)([^/@\s]+)(@)")
+
+_CREDENTIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    _OPENAI_STYLE,
+    _GITHUB_TOKEN,
+    _GITHUB_PAT,
+    _SLACK_TOKEN,
+    _AWS_AKID,
+    _GOOGLE_API_KEY,
+    _HUGGINGFACE_TOKEN,
+    _NPM_TOKEN,
+    _JWT,
+)
+
+
+def _redact_assignment(match: re.Match[str]) -> str:
+    suffix = match.group(3) if bool(match.lastindex and match.lastindex >= 3) else ""
+    return f"{match.group(1)}{REDACTED}{suffix}"
+
+
+def redact_text(text: str, *, env: Mapping[str, str] | None = None) -> str:
+    """Return ``text`` with credential-shaped substrings replaced by ``***``.
+
+    The caller -- not this helper -- decides where the result is written.  It
+    is used before persisting transcripts/diffs and before tool responses or
+    plugin metadata leave the process.  Ordinary text is preserved byte for
+    byte; only literal secrets and high-confidence credential shapes change.
+    """
+
+    redacted = str(text)
+    if not redacted:
+        return redacted
+    if env:
+        values = {
+            str(value)
+            for key, value in env.items()
+            if is_sensitive_env_name(key) and len(str(value)) >= 8
+        }
+        for value in sorted(values, key=len, reverse=True):
+            if value:
+                redacted = redacted.replace(value, REDACTED)
+    redacted = _PEM_PRIVATE_KEY.sub(REDACTED, redacted)
+    for pattern in _CREDENTIAL_PATTERNS:
+        redacted = pattern.sub(REDACTED, redacted)
+    redacted = _QUOTED_ASSIGNMENT.sub(_redact_assignment, redacted)
+    redacted = _BARE_ASSIGNMENT.sub(_redact_assignment, redacted)
+    redacted = _AUTHORIZATION.sub(_redact_assignment, redacted)
+    redacted = _URL_PASSWORD.sub(_redact_assignment, redacted)
+    return redacted
+
+
+def redact_env(env: Mapping[str, str] | None) -> dict[str, str]:
+    """Return a copy of ``env`` with credential-shaped values replaced."""
+
+    cleaned: dict[str, str] = {}
+    for key, value in (env or {}).items():
+        name = str(key)
+        text = str(value)
+        if is_sensitive_env_name(name) or redact_text(text, env=None) != text:
+            cleaned[name] = REDACTED
+        else:
+            cleaned[name] = text
+    return cleaned
+
+
 __all__ = [
+    "REDACTED",
     "SENSITIVE_FILE_PATTERNS",
     "WorkspaceRootError",
     "ensure_service_workspace",
+    "filter_sensitive_paths",
     "is_git_workspace",
+    "is_sensitive_env_name",
     "is_sensitive_name",
     "is_sensitive_path",
+    "redact_env",
+    "redact_text",
     "resolve_allowed_root",
     "scrub_subprocess_env",
 ]

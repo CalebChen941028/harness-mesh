@@ -237,6 +237,9 @@ class MarketConfig(BaseModel):
     # Upper bound for an automatic refresh before dispatch or a CLI command
     # continues with the cached (or heuristic) data.
     wait_seconds: float = 8.0
+    # Wall-clock ceiling for one provider fetch (all pages and redirects).
+    # The per-request socket timeout remains 20 seconds.
+    total_timeout_seconds: float = 60.0
     sources: list[str] = Field(
         default_factory=lambda: ["openrouter", "models_dev", "epoch", "artificial_analysis"]
     )
@@ -312,6 +315,7 @@ class MeshConfig(BaseModel):
     state_dir: str = ".harness-mesh"
     summary_max_chars: int = 1500
     diff_preview_max_chars: int = 4000
+    transcript_max_chars: int = 200_000
     default_timeout_seconds: int = 1800
     max_call_depth: int = 3
     max_failover_attempts: int = 4
@@ -620,23 +624,190 @@ def default_config() -> MeshConfig:
     )
 
 
-def find_config_path(workspace_root: str | Path | None = None) -> Path | None:
-    env_path = os.environ.get("HARNESS_MESH_CONFIG")
-    if env_path:
-        candidate = Path(os.path.expanduser(env_path))
-        if candidate.exists():
-            return candidate
-    root = Path(workspace_root or os.getcwd()).resolve()
-    candidates = [
-        root / ".harness-mesh" / "config.yaml",
-        root / "config" / "harnesses.yaml",
-        root / "config" / "harnesses.example.yaml",
-        Path(__file__).resolve().parents[2] / "config" / "harnesses.example.yaml",
-    ]
+_PACKAGE_EXAMPLE_CONFIG = (
+    Path(__file__).resolve().parents[2] / "config" / "harnesses.example.yaml"
+)
+# A workspace file may only override these fields, and only when the operator
+# sets HARNESS_MESH_TRUST_WORKSPACE_CONFIG=1.  Execution, credential and path
+# fields (harnesses, state_dir, allowed_workspace_roots, skill_roots,
+# plugin_roots, auto_init_repo, auto_approve_shared_write) never come from a
+# checkout.
+_WORKSPACE_SAFE_SCALARS = frozenset(
+    {
+        "summary_max_chars",
+        "diff_preview_max_chars",
+        "transcript_max_chars",
+        "default_timeout_seconds",
+        "transient_retries",
+        "quota_cooldown_seconds",
+        "quota_probe_interval_seconds",
+        "difficulty_effort_map",
+        "difficulty_timeout_seconds",
+        "failover_priority",
+    }
+)
+_WORKSPACE_SAFE_GROUPS = frozenset({"market", "routing"})
+_WORKSPACE_TRUST_ENV = "HARNESS_MESH_TRUST_WORKSPACE_CONFIG"
+
+
+def _env_flag(name: str) -> bool:
+    return str(os.environ.get(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _explicit_config_path() -> Path | None:
+    value = os.environ.get("HARNESS_MESH_CONFIG")
+    if not value:
+        return None
+    return Path(os.path.expanduser(value))
+
+
+def user_config_candidates() -> list[Path]:
+    """User-level config locations, most specific first."""
+
+    candidates: list[Path] = []
+    explicit = _explicit_config_path()
+    if explicit is not None:
+        candidates.append(explicit)
+    xdg_home = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_home:
+        candidates.append(Path(os.path.expanduser(xdg_home)) / "harness-mesh" / "config.yaml")
+    candidates.append(Path.home() / ".config" / "harness-mesh" / "config.yaml")
+    candidates.append(Path.home() / ".harness-mesh" / "config.yaml")
+    unique: list[Path] = []
     for candidate in candidates:
-        if candidate.exists():
+        if candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+def find_user_config_path() -> Path | None:
+    """Return the first existing user-level Mesh config, if any."""
+
+    for candidate in user_config_candidates():
+        if candidate.is_file():
             return candidate
     return None
+
+
+def default_user_config_path() -> Path:
+    """Default write target for user-level Mesh settings."""
+
+    xdg_home = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(os.path.expanduser(xdg_home)) if xdg_home else Path.home() / ".config"
+    return base / "harness-mesh" / "config.yaml"
+
+
+def workspace_config_candidates(workspace_root: str | Path | None = None) -> list[Path]:
+    """Workspace config locations.  Contents are fetched but never trusted."""
+
+    root = Path(workspace_root or os.getcwd()).expanduser().resolve()
+    return [root / ".harness-mesh" / "config.yaml", root / "config" / "harnesses.yaml"]
+
+
+def find_workspace_config_path(workspace_root: str | Path | None = None) -> Path | None:
+    """Return an existing workspace config file, if any.
+
+    The file is untrusted input.  ``load_config`` only merges its safe fields
+    when ``HARNESS_MESH_TRUST_WORKSPACE_CONFIG=1``.
+    """
+
+    for candidate in workspace_config_candidates(workspace_root):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def workspace_config_trusted() -> bool:
+    """Whether the operator opted into merging safe fields from the workspace."""
+
+    return _env_flag(_WORKSPACE_TRUST_ENV)
+
+
+def _safe_workspace_overrides(raw: Mapping[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key, value in raw.items():
+        if key in _WORKSPACE_SAFE_SCALARS:
+            safe[key] = value
+        elif key in _WORKSPACE_SAFE_GROUPS and isinstance(value, Mapping):
+            safe[key] = dict(value)
+        elif key == "integration" and isinstance(value, Mapping):
+            ignore = value.get("ignore")
+            if isinstance(ignore, list):
+                safe["integration"] = {"ignore": list(ignore)}
+    return safe
+
+
+def _merge_workspace_overrides(
+    base: Mapping[str, Any], overrides: Mapping[str, Any]
+) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in overrides.items():
+        if key in _WORKSPACE_SAFE_GROUPS and isinstance(value, Mapping):
+            current = merged.get(key)
+            group = dict(current) if isinstance(current, Mapping) else {}
+            group.update(value)
+            merged[key] = group
+        else:
+            merged[key] = value
+    return merged
+
+
+def find_config_path(workspace_root: str | Path | None = None) -> Path | None:
+    """Return the trusted config file the loader reads.
+
+    User-level config wins; the packaged example is the fallback template.
+    Workspace files are never returned: they are untrusted input and are only
+    merged by :func:`load_config` when ``HARNESS_MESH_TRUST_WORKSPACE_CONFIG=1``.
+    The ``workspace_root`` argument is kept for API compatibility.
+    """
+
+    found = find_user_config_path()
+    if found is not None:
+        return found
+    if _PACKAGE_EXAMPLE_CONFIG.is_file():
+        return _PACKAGE_EXAMPLE_CONFIG
+    return None
+
+
+def _is_trusted_seed_path(path: str | Path) -> bool:
+    """True for the packaged example or a file under the user's home."""
+
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except OSError:
+        return False
+    try:
+        if resolved == _PACKAGE_EXAMPLE_CONFIG.resolve():
+            return True
+    except OSError:
+        pass
+    try:
+        resolved.relative_to(Path.home().resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _is_untrusted_write_target(path: str | Path, workspace_root: str | Path | None) -> bool:
+    """True when writing ``path`` would touch a checkout or the packaged example."""
+
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except OSError:
+        return True
+    try:
+        if resolved == _PACKAGE_EXAMPLE_CONFIG.resolve():
+            return True
+    except OSError:
+        pass
+    if workspace_root is None:
+        return False
+    try:
+        root = Path(workspace_root).expanduser().resolve()
+        resolved.relative_to(root)
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def integration_config_path(
@@ -644,28 +815,25 @@ def integration_config_path(
 ) -> Path:
     """Where ``integration.ignore`` is written, without touching app configs.
 
-    An explicit ``--config`` (or ``HARNESS_MESH_CONFIG``) wins because that is
-    the file the loader will read next.  Otherwise the workspace Mesh config
-    is preferred; when the loader fell back to a workspace config that is not
-    this file, that file is updated in place so its other settings survive.
+    The target is always a user-level file, so a cloned repository can never be
+    modified by an ``ignore``/``unignore`` call and the packaged example stays
+    read-only.  An explicit ``--config`` or ``HARNESS_MESH_CONFIG`` is honoured
+    when it does not point into the workspace or at the packaged template.  When
+    no user file exists yet, ``$XDG_CONFIG_HOME/harness-mesh/config.yaml`` (or
+    ``~/.config/harness-mesh/config.yaml``) is created.
     """
 
     if config_path is not None:
-        return Path(config_path).expanduser()
-    root = Path(workspace_root).resolve()
-    workspace_config = root / ".harness-mesh" / "config.yaml"
-    if workspace_config.exists():
-        return workspace_config
-    found = find_config_path(root)
-    if found is not None:
-        found = found.expanduser()
-        try:
-            found.resolve().relative_to(root)
-        except (OSError, ValueError):
-            return workspace_config
-        if found.name != "harnesses.example.yaml":
-            return found
-    return workspace_config
+        candidate = Path(config_path).expanduser()
+        if not _is_untrusted_write_target(candidate, workspace_root):
+            return candidate
+    explicit = _explicit_config_path()
+    if explicit is not None and not _is_untrusted_write_target(explicit, workspace_root):
+        return explicit
+    found = find_user_config_path()
+    if found is not None and not _is_untrusted_write_target(found, workspace_root):
+        return found
+    return default_user_config_path()
 
 
 def atomic_write_text(path: str | Path, content: str) -> None:
@@ -707,8 +875,10 @@ def update_integration_ignore(
     """Add or remove one harness in ``integration.ignore`` atomically.
 
     ``seed_path`` supplies the current effective configuration when the target
-    file does not exist yet (for example the shipped example template), so
-    creating the workspace config does not silently drop its settings.
+    file does not exist yet (for example the packaged example template), so
+    creating the user config does not silently drop its settings.  Only the
+    packaged example and user-level files are accepted as seed; a workspace
+    file is repository-controlled data and is ignored here.
     """
 
     target = Path(path)
@@ -716,7 +886,7 @@ def update_integration_ignore(
     source: Path | None = None
     if target.exists():
         source = target
-    elif seed_path is not None:
+    elif seed_path is not None and _is_trusted_seed_path(seed_path):
         source = Path(seed_path)
     if source is not None and source.exists():
         parsed = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
@@ -754,8 +924,23 @@ def update_integration_ignore(
     return target
 
 
+def _read_config_mapping(path: Path) -> dict[str, Any]:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"harness-mesh config must be a mapping: {path}")
+    return raw
+
+
 def load_config(path: str | Path | None = None, workspace_root: str | Path | None = None) -> MeshConfig:
-    """Load YAML configuration on top of the built-in connection templates."""
+    """Load YAML configuration on top of the built-in connection templates.
+
+    Only user-level config files and the packaged example template are
+    trusted.  A workspace file (``.harness-mesh/config.yaml`` or
+    ``config/harnesses.yaml``) is ignored unless the operator sets
+    ``HARNESS_MESH_TRUST_WORKSPACE_CONFIG=1``; even then it may only override
+    the safe scalar/group fields listed in ``_WORKSPACE_SAFE_SCALARS`` and
+    ``_WORKSPACE_SAFE_GROUPS``.
+    """
 
     resolved: Path | None
     if path is None:
@@ -763,12 +948,18 @@ def load_config(path: str | Path | None = None, workspace_root: str | Path | Non
     else:
         resolved = Path(os.path.expanduser(str(path)))
 
-    if resolved is None or not resolved.exists():
-        return default_config()
+    raw: dict[str, Any] = {}
+    if resolved is not None and resolved.exists():
+        raw = _read_config_mapping(resolved)
 
-    raw = yaml.safe_load(resolved.read_text(encoding="utf-8")) or {}
-    if not isinstance(raw, dict):
-        raise ValueError(f"harness-mesh config must be a mapping: {resolved}")
+    if path is None and workspace_config_trusted():
+        # Later candidates are less specific; merge them first so
+        # ``.harness-mesh/config.yaml`` wins over ``config/harnesses.yaml``.
+        for workspace_path in reversed(workspace_config_candidates(workspace_root)):
+            if not workspace_path.is_file():
+                continue
+            workspace_raw = _read_config_mapping(workspace_path)
+            raw = _merge_workspace_overrides(raw, _safe_workspace_overrides(workspace_raw))
 
     defaults = default_config()
     base = defaults.model_dump()
@@ -1220,8 +1411,15 @@ __all__ = [
     "cap_text",
     "config_to_json",
     "default_config",
+    "default_user_config_path",
     "evaluate_difficulty",
     "find_config_path",
+    "find_user_config_path",
+    "find_workspace_config_path",
+    "integration_config_path",
     "load_config",
     "render_path",
+    "user_config_candidates",
+    "workspace_config_candidates",
+    "workspace_config_trusted",
 ]

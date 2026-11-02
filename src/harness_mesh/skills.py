@@ -14,9 +14,34 @@ import yaml
 
 from .config import MeshConfig
 from .models import PluginSpec, SkillSpec, TaskRequest
+from .security import redact_env
 
 _SAFE_ID = re.compile(r"[^A-Za-z0-9._-]+")
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_+#.-]+|[\u4e00-\u9fff]{2,}")
+
+
+def _public_plugin(plugin: PluginSpec) -> dict[str, Any]:
+    """Serialize a plugin for tool/CLI output with its env values redacted.
+
+    The generated MCP config is intentionally *not* redacted here: those env
+    values are what the worker harness needs to start the plugin server.  Only
+    the metadata returned by ``list_available``/MCP tool responses hides them.
+    """
+
+    payload = plugin.model_dump(mode="json")
+    env = payload.get("env")
+    if isinstance(env, dict):
+        payload["env"] = redact_env(env)
+    # ``server_config`` is the raw .mcp.json entry and carries the same env
+    # map that ``env`` was parsed from; redact both copies for output.
+    server_config = payload.get("server_config")
+    if isinstance(server_config, dict):
+        copied = dict(server_config)
+        server_env = copied.get("env")
+        if isinstance(server_env, dict):
+            copied["env"] = redact_env(server_env)
+        payload["server_config"] = copied
+    return payload
 
 
 class SkillPluginManager:
@@ -404,10 +429,21 @@ class SkillPluginManager:
             servers[plugin.name] = config
         for name, config in extra.items():
             servers[str(name)] = dict(config)
+        # Env values stay verbatim: this file is how the worker harness starts
+        # the plugin server, so redacting it would break the plugin.  The file
+        # is protected by 0700/0600 permissions instead.
         safe_id = _SAFE_ID.sub("_", task_id.strip()) or "task"
         self.mcp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(self.mcp_dir, 0o700)
+        except OSError:
+            pass
         path = self.mcp_dir / f".mcp.{safe_id}.json"
         path.write_text(json.dumps({"mcpServers": servers}, indent=2, ensure_ascii=False), encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
         return path
 
     def mcp_config_path(self, task_id: str) -> Path:
@@ -419,7 +455,7 @@ class SkillPluginManager:
         plugins = self.match_plugins(query, limit=50) if query else self.scan_plugins()
         return {
             "skills": [skill.model_dump(mode="json") for skill in skills],
-            "plugins": [plugin.model_dump(mode="json") for plugin in plugins],
+            "plugins": [_public_plugin(plugin) for plugin in plugins],
             "skill_roots": [str(root) for root in self.skill_roots()],
             "plugin_roots": [str(root) for root in self.plugin_roots()],
         }

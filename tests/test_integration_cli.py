@@ -64,10 +64,16 @@ def _write_config(
                 ]
             )
     text = "\n".join(lines) + "\n" + extra
-    path = workspace / ".harness-mesh" / "config.yaml"
+    path = _user_config_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def _user_config_path(workspace: Path) -> Path:
+    """User-level config the CLI discovers through HOME; never the checkout."""
+
+    return workspace.parent / "home" / ".config" / "harness-mesh" / "config.yaml"
 
 
 def _invoke(workspace: Path, *args: str):
@@ -137,7 +143,7 @@ def test_integrations_text_lists_state_and_next_command(tmp_path):
 # ----------------------------------------------------------------------
 def test_ignore_and_unignore_round_trip(tmp_path):
     workspace = _workspace(tmp_path)
-    config_path = workspace / ".harness-mesh" / "config.yaml"
+    config_path = _user_config_path(workspace)
 
     ignored = _invoke(workspace, "integrations", "ignore", "zcode")
     assert ignored.exit_code == 0, _plain(ignored.output)
@@ -160,7 +166,7 @@ def test_ignore_and_unignore_round_trip(tmp_path):
 
 def test_ignore_preserves_unrelated_configuration(tmp_path):
     workspace = _workspace(tmp_path, extra="summary_max_chars: 1234\n")
-    config_path = workspace / ".harness-mesh" / "config.yaml"
+    config_path = _user_config_path(workspace)
     before = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     result = _invoke(workspace, "integrations", "ignore", "claude_code")
     assert result.exit_code == 0, _plain(result.output)
@@ -178,16 +184,16 @@ def test_ignore_is_idempotent_and_json_has_a_stable_shape(tmp_path):
     payload = json.loads(_plain(result.output))
     assert payload["harness"] == "zcode"
     assert payload["ignored"] is True
-    assert payload["config_path"] == str(workspace / ".harness-mesh" / "config.yaml")
+    assert payload["config_path"] == str(_user_config_path(workspace))
     raw = yaml.safe_load(
-        (workspace / ".harness-mesh" / "config.yaml").read_text(encoding="utf-8")
+        _user_config_path(workspace).read_text(encoding="utf-8")
     )
     assert raw["integration"]["ignore"] == ["zcode"]
 
 
 def test_ignore_rejects_an_unknown_harness(tmp_path):
     workspace = _workspace(tmp_path)
-    config_path = workspace / ".harness-mesh" / "config.yaml"
+    config_path = _user_config_path(workspace)
     before = config_path.read_bytes()
     result = _invoke(workspace, "integrations", "ignore", "unknown")
     output = _plain(result.output)
@@ -230,7 +236,7 @@ def test_doctor_hint_disappears_when_the_harness_is_ignored(tmp_path):
 
 def test_status_prints_the_same_hint_without_writing_config(tmp_path):
     workspace = _workspace(tmp_path)
-    config_path = workspace / ".harness-mesh" / "config.yaml"
+    config_path = _user_config_path(workspace)
     before = config_path.read_bytes()
     result = _invoke(workspace, "status")
     output = _plain(result.output)
@@ -257,3 +263,45 @@ def test_status_hint_disappears_when_integrated(tmp_path):
     )
     output = _plain(_invoke(workspace, "status").output)
     assert "integration:" not in output
+
+
+# ----------------------------------------------------------------------
+# binary resolution hints (new-user troubleshooting)
+# ----------------------------------------------------------------------
+EXPECTED_USER_CONFIG = "harness-mesh"
+
+
+def test_doctor_prints_binary_hint_when_a_harness_cli_is_missing(tmp_path):
+    workspace = _workspace(tmp_path)  # only claude_code and zcode exist
+    output = _plain(_invoke(workspace, "doctor").output)
+    assert "binary hint:" in output
+    assert "codex" in output.split("binary hint:", 1)[1]
+    assert "binary_paths" in output
+    assert str(Path(workspace.parent / "home" / ".config" / EXPECTED_USER_CONFIG / "config.yaml")) in output
+
+
+def test_status_prints_binary_hint_when_a_harness_cli_is_missing(tmp_path):
+    workspace = _workspace(tmp_path)
+    output = _plain(_invoke(workspace, "status").output)
+    assert "binary hint:" in output
+    assert "PATH" in output
+    assert "binary_paths" in output
+
+
+def test_no_binary_hint_when_every_enabled_cli_exists(tmp_path):
+    workspace = _workspace(
+        tmp_path,
+        detected=("claude_code", "codex", "deepseek", "antigravity", "zcode"),
+    )
+    output = _plain(_invoke(workspace, "doctor").output)
+    assert "binary hint:" not in output
+    assert output.rstrip().splitlines()[-1].startswith("integration:")
+
+
+def test_install_dry_run_prints_binary_hint(tmp_path):
+    workspace = _workspace(tmp_path)
+    result = _invoke(workspace, "install", "--dry-run", "--yes")
+    output = _plain(result.output)
+    assert result.exit_code == 0, output
+    assert "binary hint:" in output
+    assert "binary_paths" in output

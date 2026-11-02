@@ -2,7 +2,7 @@
 
 一个工单可以依次交给 Claude Code、OpenAI Codex、DeepSeek Harness、Google Antigravity、ZCode 执行。工单绑定一份独立 Git Worktree；单次执行（Assignment）在额度耗尽、模型未授权或凭证失效时换到另一个 Harness，半成品代码和上下文留在原目录。
 
-[English](README.md) · [安全策略](SECURITY.md) · [贡献指南](CONTRIBUTING.md) · [MIT License](LICENSE)
+[English](README.md) · [安全策略](SECURITY.md) · [文档](docs/README.md) · [贡献指南](CONTRIBUTING.md) · [MIT License](LICENSE)
 
 ## 产品形态
 
@@ -93,11 +93,11 @@ hmesh install --uninstall               # 卸载集成
 ```bash
 hmesh install --approve dispatch   # 默认：14 个只读与调度工具
 hmesh install --approve read       # 11 个只读工具
-hmesh install --approve all        # 全部 18 个
+hmesh install --approve all        # 16 个；apply_task_patch 与 install_integration 永远人工批准
 hmesh install --approve none       # 不写入，并清掉本工具写过的规则
 ```
 
-默认级别 `dispatch` 批准 11 个只读工具，以及 `dispatch_task`、`parallel_dispatch`、`cancel_task`。派发任务在隔离 Worktree 内运行，改动要经过 `apply_task_patch` 才进入主工作区。四个写入工具仍默认人工批准：`apply_task_patch`、`report_quota_status`、`update_project_context`、`install_integration` 会改动主工作区、共享状态或其他应用的配置。确实需要时用 `--approve all` 一并放行。
+默认级别 `dispatch` 批准 11 个只读工具，以及 `dispatch_task`、`parallel_dispatch`、`cancel_task`。派发任务在隔离 Worktree 内运行，改动要经过 `apply_task_patch` 才进入主工作区。四个写入工具仍默认人工批准：`apply_task_patch`、`report_quota_status`、`update_project_context`、`install_integration` 会改动主工作区、共享状态或其他应用的配置。`--approve all` 会额外放行 `report_quota_status` 与 `update_project_context`，但 `apply_task_patch` 和 `install_integration` 永远人工批准，不会写入 Harness 的 allow 规则。除 Harness 侧审批外，MCP 服务端自身还有一道闸门：`HARNESS_MESH_READ_ONLY=1` 拒绝全部写入工具，Worker 被拒绝 controller 专属写入工具；`hmesh apply` 与 `hmesh install` 使用同一套检查。
 
 | Harness | 文件 | 规则 |
 | :--- | :--- | :--- |
@@ -199,7 +199,7 @@ hmesh-mcp
 hmesh-mcp --no-monitor
 ```
 
-主工作区由 `HARNESS_MESH_WORKSPACE` 指定，配置文件由 `HARNESS_MESH_CONFIG` 指定。
+主工作区由 `HARNESS_MESH_WORKSPACE` 指定，配置文件由 `HARNESS_MESH_CONFIG` 指定；未设置时依次读取 `$XDG_CONFIG_HOME/harness-mesh/config.yaml`（通常是 `~/.config/harness-mesh/config.yaml`）与 `~/.harness-mesh/config.yaml`。
 
 ## 五个 Harness 的真实接入
 
@@ -353,7 +353,9 @@ hmesh version
 
 ## 配置
 
-模板在 [`config/harnesses.example.yaml`](config/harnesses.example.yaml)。复制到 `.harness-mesh/config.yaml`，或用 `--config` / `HARNESS_MESH_CONFIG` 指定。二进制搜索支持 `~` 与 `*` glob，并按版本号/修改时间取最新；macOS ZCode 自动生成 `.harness-mesh/bin/zcode`。
+模板在 [`config/harnesses.example.yaml`](config/harnesses.example.yaml)。复制到 `~/.config/harness-mesh/config.yaml`，或用 `--config` / `HARNESS_MESH_CONFIG` 指定。仓库内的 `config/harnesses.yaml` 与 `.harness-mesh/config.yaml` 属于不可信仓库内容，默认不加载：克隆来的仓库不能决定执行哪个二进制、也不能决定凭据发往哪里。`HARNESS_MESH_TRUST_WORKSPACE_CONFIG=1` 只合并非执行类字段（市场、路由、尺寸、配额）；`--config` 与 `HARNESS_MESH_CONFIG` 由用户显式指定，始终可信。解析顺序是：先在 `PATH` 上找命令名（`claude`、`codex`、`dsh`、`agy`、`zcode`），再找配置里的 `binary_paths`（内置的 macOS 应用包路径，加上你自己追加的路径），最后才是 macOS ZCode shim。因此标准方式安装、CLI 已在 `PATH` 上的开发者不需要配置，也不需要绝对路径；内置应用包路径只是给那些没把 CLI 放进 `PATH` 的桌面应用安装兜底。如果某个 Harness 装在 `PATH` 之外，把它加到用户级配置文件的 `binary_paths` 里即可。二进制搜索支持 `~` 与 `*` glob，并按版本号/修改时间取最新；macOS ZCode 自动生成 `.harness-mesh/bin/zcode`。
+
+状态目录会收紧为 `0700`，`state.db` 及其 `-wal`/`-shm` 收紧为 `0600`。Transcript、Diff 与 checkpoint 先脱敏再落库；transcript 资源受 `transcript_max_chars`（默认 200000）限制。从 0.4.1 升级时，第一个 0.4.2 进程会改写遗留的凭据型 `provider` 行并 VACUUM 账本；请重启所有运行 `hmesh-mcp` 的 Harness，确保加载的是加固后的服务端。
 
 模板占位符：`{prompt}`、`{system_prompt}`、`{system_prompt_file}`、`{model}`、`{effort}`、`{workdir}`、`{mcp_config}`、`{task_id}`、`{assignment_id}`。空 flag/value 对会自动省略，因此 `<cli_active_default>` 表示使用 Harness 自己的激活模型。
 

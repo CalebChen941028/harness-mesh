@@ -158,8 +158,11 @@ def test_claude_approval_levels_raise_lower_and_clear(tmp_path):
 
     installer.approval_level = "all"
     installer.install(["claude_code"])
-    assert len(_managed(_claude_allow(home), CLAUDE_PREFIX)) == 18
-    assert "mcp__harness-mesh__apply_task_patch" in _claude_allow(home)
+    # "all" pre-approves the write tools except the always-manual ones.
+    assert len(_managed(_claude_allow(home), CLAUDE_PREFIX)) == 16
+    assert "mcp__harness-mesh__apply_task_patch" not in _claude_allow(home)
+    assert "mcp__harness-mesh__install_integration" not in _claude_allow(home)
+    assert "mcp__harness-mesh__report_quota_status" in _claude_allow(home)
 
     installer.approval_level = "read"
     installer.install(["claude_code"])
@@ -249,7 +252,7 @@ def test_antigravity_writes_approvals_and_preserves_other_keys(tmp_path):
         "theme": "dark",
         "userSettings": {
             "globalPermissionGrants": {
-                "allow": ["write_file(/Users/me/AGENTS.md)", "mcp(other/tool)"],
+                "allow": ["write_file(/home/user/AGENTS.md)", "mcp(other/tool)"],
                 "deny": ["shell(rm)"],
             },
             "telemetry": False,
@@ -267,7 +270,7 @@ def test_antigravity_writes_approvals_and_preserves_other_keys(tmp_path):
     assert written["userSettings"]["telemetry"] is False
     assert written["userSettings"]["globalPermissionGrants"]["deny"] == ["shell(rm)"]
     allow = written["userSettings"]["globalPermissionGrants"]["allow"]
-    assert "write_file(/Users/me/AGENTS.md)" in allow
+    assert "write_file(/home/user/AGENTS.md)" in allow
     assert "mcp(other/tool)" in allow
     assert len(_managed(allow, AGY_PREFIX)) == 14
     assert "mcp(harness-mesh/dispatch_task)" in allow
@@ -297,7 +300,7 @@ def test_antigravity_reinstall_is_idempotent(tmp_path):
 def test_antigravity_levels_none_and_uninstall_clear_only_managed(tmp_path):
     installer, home, _ = _installer(tmp_path, level="all")
     installer.install(["antigravity"])
-    assert len(_managed(_agy_allow(home), AGY_PREFIX)) == 18
+    assert len(_managed(_agy_allow(home), AGY_PREFIX)) == 16
 
     installer.approval_level = "read"
     installer.install(["antigravity"])
@@ -424,7 +427,7 @@ def test_codex_levels_none_and_uninstall_clear_managed_block(tmp_path):
     installer, home, _ = _installer(tmp_path, level="all")
     installer.install(["codex"])
     parsed = tomllib.loads(_codex_path(home).read_text(encoding="utf-8"))
-    assert len(parsed["mcp_servers"]["harness-mesh"]["tools"]) == 18
+    assert len(parsed["mcp_servers"]["harness-mesh"]["tools"]) == 16
 
     installer.approval_level = "read"
     installer.install(["codex"])
