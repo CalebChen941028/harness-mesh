@@ -29,7 +29,7 @@ from .approvals import (
     TOOL_APPROVAL_CLASSES,
     tools_for_level,
 )
-from .config import MeshConfig, find_config_path, resolve_harness_binary
+from .config import MeshConfig, find_user_config_path, resolve_harness_binary
 
 Runner = Callable[[list[str], Path, dict[str, str]], tuple[int, str, str]]
 
@@ -206,7 +206,11 @@ class HarnessInstaller:
                 + ", ".join(APPROVAL_LEVELS)
             )
         self.state_dir = config.state_path(self.workspace_root)
-        resolved_config = Path(config_path).expanduser() if config_path else find_config_path(self.workspace_root)
+        # Only a user-level configuration may be embedded into the MCP server
+        # registration; a workspace checkout is never a trusted config source.
+        resolved_config = (
+            Path(config_path).expanduser() if config_path else find_user_config_path()
+        )
         self.config_path = resolved_config if resolved_config and resolved_config.exists() else None
         self.python = sys.executable
         self.mcp_args = ["-m", "harness_mesh.mcp_server"]
@@ -625,6 +629,20 @@ class HarnessInstaller:
                     )
                 )
                 continue
+            refusal = self._doctor_command_refusal(str(resolved), args)
+            if refusal is not None:
+                # Never execute a command we did not register ourselves: the
+                # doctor is read-only and must not become a generic launcher.
+                results.append(
+                    DoctorResult(
+                        harness,
+                        "failed",
+                        refusal,
+                        command,
+                        approvals=approvals,
+                    )
+                )
+                continue
             argv = [str(resolved), *args, "--help"]
             code, stdout, stderr = self._run_doctor(argv)
             if code == 0:
@@ -657,6 +675,40 @@ class HarnessInstaller:
             return self.runner(argv, self.workspace_root, self._command_env())
         except (OSError, subprocess.TimeoutExpired) as exc:
             return 127, "", str(exc)
+
+    @staticmethod
+    def _resolved_executable(path: str) -> Path | None:
+        try:
+            return Path(path).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            return None
+
+    def _doctor_command_refusal(self, command: str, args: list[str]) -> str | None:
+        """Refuse to execute anything but the harness-mesh MCP server entry.
+
+        A registered command lives in another application's configuration and
+        is therefore untrusted input for the doctor: executing it would turn a
+        read-only health check into a generic command launcher.  Only the exact
+        ``<current interpreter> -m harness_mesh.mcp_server`` form is run; every
+        other shape is reported without executing anything.
+        """
+
+        expected = self._resolved_executable(sys.executable)
+        actual = self._resolved_executable(command)
+        if expected is None or actual is None or actual != expected:
+            return (
+                f"registered command is not the current harness-mesh interpreter: {command}; "
+                "refusing to execute it. Expected the active Python with "
+                "`-m harness_mesh.mcp_server`; reinstall with `hmesh install --yes`."
+            )
+        expected_args = list(self.mcp_args)
+        if args[: len(expected_args)] != expected_args:
+            return (
+                "registered command does not start the harness-mesh MCP server "
+                f"(expected args {expected_args!r}); refusing to execute it. "
+                "Reinstall with `hmesh install --yes`."
+            )
+        return None
 
     def _install_harness(self, harness: str) -> InstallResult:
         if harness == "zcode":
@@ -707,17 +759,36 @@ class HarnessInstaller:
             return 0, "[dry-run]", ""
         return self.runner(argv, self.workspace_root, self._command_env())
 
+    def _user_level_config_path(self) -> Path | None:
+        """Return the config path only when it is a user-level file inside HOME.
+
+        The spawned MCP server must never be pointed at a configuration file
+        from a checkout (or at the packaged example): only the user's own
+        config is a trusted source for the server it launches.
+        """
+
+        if self.config_path is None:
+            return None
+        try:
+            path = self.config_path.expanduser().resolve()
+            path.relative_to(self.home_dir.expanduser().resolve())
+        except (OSError, ValueError):
+            return None
+        return path
+
     def _command_env(self) -> dict[str, str]:
         env = dict(self.env)
         env.setdefault("HARNESS_MESH_WORKSPACE", str(self.workspace_root))
-        if self.config_path is not None:
-            env.setdefault("HARNESS_MESH_CONFIG", str(self.config_path))
+        config_path = self._user_level_config_path()
+        if config_path is not None:
+            env.setdefault("HARNESS_MESH_CONFIG", str(config_path))
         return env
 
     def _mcp_env(self) -> dict[str, str]:
         env = {"HARNESS_MESH_WORKSPACE": str(self.workspace_root)}
-        if self.config_path is not None:
-            env["HARNESS_MESH_CONFIG"] = str(self.config_path)
+        config_path = self._user_level_config_path()
+        if config_path is not None:
+            env["HARNESS_MESH_CONFIG"] = str(config_path)
         return env
 
     def _resolve_binary(self, harness: str) -> str | None:
@@ -1464,8 +1535,6 @@ class HarnessInstaller:
             backup = path.with_suffix(path.suffix + ".harness-mesh.bak")
             existed = path.exists()
             original = path.read_text(encoding="utf-8") if existed else ""
-            if existed and not backup.exists():
-                backup.write_text(original, encoding="utf-8")
             try:
                 content = _dsh_patch_content(path, entry)
             except (OSError, ValueError, yaml.YAMLError) as exc:
@@ -1476,6 +1545,19 @@ class HarnessInstaller:
             except (ValueError, yaml.YAMLError) as exc:
                 failure = f"failed to validate {path}: {exc}"
                 break
+            if existed:
+                # Back up atomically only after the replacement validated, and
+                # abort before touching the original if the backup cannot be
+                # written.
+                try:
+                    if not backup.exists():
+                        _atomic_write_text(backup, original)
+                    # The backup can contain provider config fragments; keep it
+                    # private even when it predates this implementation.
+                    os.chmod(backup, 0o600)
+                except OSError as exc:
+                    failure = f"failed to back up {path}: {exc}"
+                    break
             try:
                 _atomic_write_text(path, content)
             except OSError as exc:
@@ -1819,7 +1901,9 @@ def _remove_dsh_block(path: Path) -> None:
     if not path.exists():
         return
     text = _remove_dsh_block_text(path.read_text(encoding="utf-8"))
-    path.write_text(text, encoding="utf-8")
+    # Atomic replace: an interrupted uninstall must never truncate the user's
+    # Cordis patch file (the previous ``write_text`` did).
+    _atomic_write_text(path, text)
 
 
 __all__ = [

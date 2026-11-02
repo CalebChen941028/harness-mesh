@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.4.2 — 2026-11-02
+
+Security hardening release following an independent audit of 0.4.1. No new harness or model features; behaviour changes are security fixes.
+
+### Security — critical
+
+- Workspace configuration is untrusted. `find_config_path` no longer discovers `{workspace}/.harness-mesh/config.yaml` or `{workspace}/config/harnesses.yaml`; only `HARNESS_MESH_CONFIG`, `$XDG_CONFIG_HOME/harness-mesh/config.yaml`, `~/.config/harness-mesh/config.yaml` and `~/.harness-mesh/config.yaml` are trusted, with the packaged example as a read-only fallback. A malicious checkout could previously point a harness `binary`, `version_args` or `execute_template` at its own payload and execute it from `hmesh status` or from pre-approved MCP read tools such as `list_harnesses`. `HARNESS_MESH_TRUST_WORKSPACE_CONFIG=1` re-enables only a safe field list (market, routing, sizes, quotas) and never the executable, credential or path fields. `hmesh install` and `hmesh doctor` no longer read workspace configuration at all. Migration: teams that kept `binary_paths`, `execute_template` or harness overrides in a committed `config/harnesses.yaml` must move them to `~/.config/harness-mesh/config.yaml` (or pass `--config`); harness CLIs installed on `PATH` need no configuration at all, and the built-in macOS bundle paths remain fallbacks.
+- Credentials never enter the ledger or tool responses. `DiscoveredModel.provider` is now a short enum-shaped label; a provider registry stored as a dict, a long value, or a credential-shaped string falls back to the harness name. `discover_harness_models` projects every model through `public_view()`, and `list_skills_and_plugins` redacts MCP server `env` values. `StateStore` rewrites legacy credential-shaped `provider` values on open, then checkpoints and vacuums so the old bytes leave the database and WAL.
+- Model discovery cannot be pointed at an attacker. Base URL and API-key sources are restricted to the environment and user-level files; workspace harness files no longer contribute to authentication. Requests require HTTPS (plain HTTP only for loopback), reject userinfo, do not follow redirects, and `HARNESS_MESH_OFFLINE=1` now also stops discovery HTTP. `trust_env=False` keeps proxy environment variables out of the market and discovery clients.
+- Worktree `.git` pointers are validated before any Git command runs inside a worktree: the pointer must be a regular file, its `gitdir` must sit under the primary repository's `.git/worktrees/`, and the backlink must return to that worktree. The git guard hashes the pointer and gitdir path as well as the primary git metadata, closing a filter-driver path to command execution from a file-write-only agent.
+
+### Security — high
+
+- `task_id` is validated (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, no `..`, no trailing dot, reserved names rejected). A cross-process running assignment blocks the same id with a non-mutating `task_conflict` rejection, and worktree reuse requires a matching `.harness-mesh-worktree.json` marker. `task_id="."` can no longer remove the worktree root.
+- Sensitive-file filtering now runs on the resolved path list rather than Git glob pathspecs, so nested `.env`/`*.pem`/`id_rsa` files and case-varied names are excluded from the diff, from the ledger and from `apply_task_patch`. Merge applies require a clean target and roll back on failure; apply verifies newly created symlinks and decodes Git's quoted paths.
+- Instruction files (`AGENTS.md`, `CLAUDE.md`, `.harness-mesh/PROJECT_CONTEXT.md`, `.cursorrules`, Copilot instructions) must be regular files inside the workspace; symlinks and sensitive paths are rejected before their content reaches `get_project_context` or a dispatch prompt. Boundary-tag escaping normalises full-width lookalikes.
+- `HARNESS_MESH_READ_ONLY=1` now refuses every write tool (`apply_task_patch`, `install_integration`, `update_project_context`, `report_quota_status`, `cancel_task`), and a caller resolved to a running assignment is refused the controller-only subset. `hmesh apply` and `hmesh install` use the same gate in the CLI. `--approve all` no longer pre-approves `apply_task_patch` or `install_integration`; those two are always manual.
+- `hmesh context set` derives provenance from lineage, so a worker can no longer write into the trusted `<project_shared_memory>` block; `router.update_project_context` defaults to `auto`.
+- Worker stdout/stderr, diffs and checkpoints are redacted before they are persisted or placed in a prompt; the transcript resource is capped by `transcript_max_chars` (default 200,000, head and tail kept) instead of growing without bound.
+- `hmesh doctor` executes a registered command only when it is the current interpreter with `-m harness_mesh.mcp_server`; anything else is reported without running. DSH profile backups and uninstall now use atomic writes with mode 0600.
+
+### Security — medium
+
+- The state directory is created/tightened to 0700 and `state.db`, `-wal`, `-shm` to 0600. Generated per-task MCP config files are 0600 and their directory 0700.
+- `market.total_timeout_seconds` (default 60) puts a wall-clock ceiling on a provider refresh; the per-socket timeout remains 20 seconds.
+- Committed `.harness-mesh/` state is still not trusted as configuration, but the state directory can hold sensitive excerpts: keep it out of commits, archives and shared machines. Upgrading from 0.4.1 rewrites legacy credential columns on first open; restart any harness that runs `hmesh-mcp` so the new server process is used.
+- New-user troubleshooting: `hmesh doctor`, `hmesh status` and `hmesh install` print one `binary hint` line when a configured harness CLI cannot be resolved, naming the missing harnesses, the user-level config path and the `binary_paths` option. Harnesses found on `PATH` never trigger the hint.
+
+### Packaging, CI and documentation
+
+- `MANIFEST.in` now ships exactly `config/harnesses.example.yaml` and the published docs instead of any `config/*.yaml`; a developer's local config can no longer leak into an sdist.
+- CI actions are pinned by commit SHA (`actions/checkout`, `actions/setup-python`), and `pip-audit` is version-pinned and blocking instead of advisory.
+- The independent audit is published at `docs/security/2026-11-audit.md` with code locations and remediation. Raw credential values, local paths and ready-to-run attack payloads are not included; internal research and planning notes were removed from the repository.
+- `docs/README.md` indexes the published documentation.
+
 ## 0.4.1 — 2026-11-01
 
 Pre-release audit of the public repository. No runtime behaviour changes.

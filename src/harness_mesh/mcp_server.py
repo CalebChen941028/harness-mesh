@@ -13,7 +13,7 @@ except ImportError:  # pragma: no cover - MCP v2 renamed FastMCP to MCPServer
     from mcp.server.mcpserver import MCPServer as FastMCP  # type: ignore
 
 from .approvals import DEFAULT_APPROVAL_LEVEL
-from .config import find_config_path, load_config
+from .config import find_user_config_path, load_config
 from .installer import HarnessInstaller
 from .lineage import (
     _effective_call_depth,
@@ -21,10 +21,12 @@ from .lineage import (
     _merge_trace_chain,
     _task_id_from_cwd,
     _workspace_from_cwd,
+    caller_task_id,
 )
 from .market import filter_market_models
 from .models import (
     ContinuationCheckpoint,
+    DiscoveredModel,
     QuotaExhaustedPolicy,
     TaskDifficulty,
     TaskKind,
@@ -74,7 +76,132 @@ _integration_warning = (
     "after the user agrees"
 )
 
+#: Write tools a worker must never invoke, even when the harness pre-approved
+#: them.  Applying a patch, editing another app's global configuration,
+#: cancelling tickets and forcing quota circuits are controller-only decisions.
+_WORKER_FORBIDDEN_WRITES: frozenset[str] = frozenset(
+    {"apply_task_patch", "install_integration", "cancel_task", "report_quota_status"}
+)
+
+#: Fields returned by ``DiscoveredModel.public_view`` -- used to project model
+#: payloads that already arrive as dicts from the router.
+_PUBLIC_MODEL_FIELDS: tuple[str, ...] = (
+    "provider",
+    "authorized",
+    "capability_score",
+    "intelligence",
+    "intelligence_source",
+    "blended_price",
+    "assigned_tiers",
+    "context_window",
+    "supports_reasoning",
+    "is_active_default",
+)
+
 _runtime: MeshRuntime | None = None
+
+
+def _read_only_flag(router: MeshRouter) -> bool:
+    env = router.env if router.env is not None else os.environ
+    return (
+        os.environ.get("HARNESS_MESH_READ_ONLY") == "1"
+        or env.get("HARNESS_MESH_READ_ONLY") == "1"
+    )
+
+
+def _worker_task_id(router: MeshRouter) -> str | None:
+    """Return the calling worker's task id, or ``None`` for a controller.
+
+    ``lineage.caller_task_id`` checks the inherited environment first and the
+    recorded ancestry/worktree second.  The local ``_task_id_from_cwd`` fallback
+    keeps this helper compatible with callers that already resolved the worker
+    identity in-process (and with tests that stub that hook).
+    """
+
+    task_id = caller_task_id(router)
+    if task_id:
+        return task_id
+    return _task_id_from_cwd(router)
+
+
+def _write_refusal(router: MeshRouter, action: str) -> dict[str, Any] | None:
+    """Return why this caller may not run a write tool, or ``None`` when allowed.
+
+    ``HARNESS_MESH_READ_ONLY=1`` refuses every write tool; a caller resolved to
+    a running Assignment (a worker) is additionally refused the
+    controller-only subset.  This is the server-side gate: harness-side
+    pre-approvals are not a substitute for it.
+    """
+
+    if _read_only_flag(router):
+        return {
+            "refused": True,
+            "error": (
+                "harness-mesh is running read-only (HARNESS_MESH_READ_ONLY=1); "
+                f"{action} is disabled"
+            ),
+        }
+    if action in _WORKER_FORBIDDEN_WRITES:
+        task_id = _worker_task_id(router)
+        if task_id:
+            if action == "install_integration":
+                return {
+                    "refused": True,
+                    "error": f"{_integration_warning} (assignment {task_id})",
+                }
+            return {
+                "refused": True,
+                "error": (
+                    f"workers cannot run {action}; only the controller may "
+                    f"(assignment {task_id})"
+                ),
+            }
+    return None
+
+
+def _integration_refusal(router: MeshRouter) -> str | None:
+    """Return why this caller may not install, or ``None`` when allowed.
+
+    Kept as a thin wrapper for callers/tests that only need the message.
+    """
+
+    refusal = _write_refusal(router, "install_integration")
+    return str(refusal["error"]) if refusal is not None else None
+
+
+def _public_model_view(harness: str, model: Any) -> dict[str, Any] | None:
+    """Project one discovered model through ``public_view`` (defense in depth)."""
+
+    if isinstance(model, DiscoveredModel):
+        return model.public_view()
+    if isinstance(model, dict):
+        try:
+            instance = DiscoveredModel(
+                harness=str(model.get("harness") or harness),
+                model_id=str(model["model_id"]),
+                source=str(model.get("source") or "local_config"),
+                **{
+                    field: model[field]
+                    for field in _PUBLIC_MODEL_FIELDS
+                    if field in model
+                },
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+        return instance.public_view()
+    return None
+
+
+def _public_discover_payload(harness: str, payload: Any) -> Any:
+    """Whitelist the ``models`` list of one discover payload via public_view."""
+
+    if not isinstance(payload, dict):
+        return payload
+    models = payload.get("models")
+    if not isinstance(models, list):
+        return payload
+    views = [view for model in models if (view := _public_model_view(harness, model)) is not None]
+    return {**payload, "models": views}
 
 
 def get_runtime() -> MeshRuntime:
@@ -118,8 +245,7 @@ def _installation(
         home_dir=router.home_dir,
         env=router.env,
         which=getattr(router.discovery, "_which", None),
-        config_path=os.environ.get("HARNESS_MESH_CONFIG")
-        or find_config_path(router.workspace_root),
+        config_path=os.environ.get("HARNESS_MESH_CONFIG") or find_user_config_path(),
         dry_run=dry_run,
         approval_level=approve_level,
     )
@@ -170,8 +296,13 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
 
         payload = await router.discover_harness_models(harness=harness, force_refresh=force_refresh)
         if harness is None:
-            return {"harnesses": payload}
-        return payload
+            return {
+                "harnesses": {
+                    name: _public_discover_payload(name, item)
+                    for name, item in payload.items()
+                }
+            }
+        return _public_discover_payload(harness, payload)
 
     @server.tool()
     def get_model_market(query: str = "", limit: int = 50) -> dict[str, Any]:
@@ -370,6 +501,9 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
     ) -> dict[str, Any]:
         """Manually reset or mark a quota circuit (actions: reset, open, half_open)."""
 
+        refusal = _write_refusal(router, "report_quota_status")
+        if refusal is not None:
+            return {**refusal, "action": action}
         try:
             return await router.report_quota_status(
                 harness,
@@ -388,6 +522,9 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
         strategy is destructive and remains a CLI-only operation.
         """
 
+        refusal = _write_refusal(router, "apply_task_patch")
+        if refusal is not None:
+            return {**refusal, "task_id": task_id}
         if strategy not in {"patch", "merge"}:
             return {
                 "error": "MCP apply_task_patch supports only 'patch' or 'merge'; "
@@ -403,6 +540,9 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
     async def cancel_task(task_id: str) -> dict[str, Any]:
         """Cancel a running or waiting ticket. The worktree is retained for inspection."""
 
+        refusal = _write_refusal(router, "cancel_task")
+        if refusal is not None:
+            return {**refusal, "task_id": task_id}
         try:
             return await router.cancel_task(task_id)
         except TaskNotFoundError as exc:
@@ -428,8 +568,11 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
     ) -> dict[str, Any]:
         """Write or update one shared project fact or interface contract."""
 
+        refusal = _write_refusal(router, "update_project_context")
+        if refusal is not None:
+            return {**refusal, "key": key}
         try:
-            source = "worker" if _task_id_from_cwd(router) or os.environ.get("HARNESS_MESH_TASK_ID") else "controller"
+            source = "worker" if _worker_task_id(router) else "controller"
             return router.update_project_context(
                 key,
                 content,
@@ -485,9 +628,9 @@ def create_server(runtime: MeshRuntime | MeshRouter | None = None) -> Any:
         plan.  The target harness must restart before the tools appear.
         """
 
-        refusal = _integration_refusal(router)
+        refusal = _write_refusal(router, "install_integration")
         if refusal is not None:
-            return {"harness": harness, "installed": False, "error": refusal}
+            return {**refusal, "harness": harness, "installed": False}
         try:
             installer = _installation(router, approve_level=approve_level)
             return installer.install_integration(harness, approve_level, plan_id)

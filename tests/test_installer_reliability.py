@@ -125,7 +125,9 @@ def test_dsh_patch_rolls_back_when_validation_fails(tmp_path, monkeypatch):
     result = installer.install(["deepseek"])[0]
     assert result.action == "failed"
     assert patch.read_text(encoding="utf-8") == original
-    assert patch.with_suffix(".yml.harness-mesh.bak").exists()
+    # Validation runs before anything is written: no backup is produced for a
+    # patch that never validated (D7: backup only right before the real write).
+    assert not patch.with_suffix(".yml.harness-mesh.bak").exists()
 
 
 def test_cli_install_refuses_non_interactive_without_yes(tmp_path):

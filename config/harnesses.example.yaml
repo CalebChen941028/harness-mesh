@@ -12,6 +12,9 @@
 # A flag/value pair is dropped automatically when its value is empty (for
 # example `--model {model}` when the harness should use its own active model).
 
+# This template is trusted only when it is copied to a user-level path
+# (~/.config/harness-mesh/config.yaml) or passed explicitly with --config /
+# HARNESS_MESH_CONFIG. Workspace copies are untrusted repository content.
 state_dir: .harness-mesh
 # Optional allowlist for request-level workspace_root values. Empty means
 # only the service startup workspace is allowed.
@@ -22,6 +25,8 @@ auto_init_repo: false
 auto_approve_shared_write: false
 summary_max_chars: 1500
 diff_preview_max_chars: 4000
+# Cap for the paged transcript resource; head and tail are kept.
+transcript_max_chars: 200000
 default_timeout_seconds: 1800
 max_call_depth: 3
 max_active_assignments: 8
@@ -68,6 +73,8 @@ integration:
 market:
   enabled: true
   ttl_seconds: 21600
+  # Wall-clock ceiling for one provider refresh (per-socket timeout stays 20s).
+  total_timeout_seconds: 60
   sources:
     - openrouter
     - models_dev

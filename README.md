@@ -2,7 +2,7 @@
 
 Run one coding ticket across Claude Code, OpenAI Codex, DeepSeek Harness, Google Antigravity and ZCode. A ticket owns one isolated Git worktree; individual *assignments* may fail over between harnesses, models and sessions while the worktree and partial work stay in place.
 
-[中文文档](README.zh-CN.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [MIT License](LICENSE)
+[中文文档](README.zh-CN.md) · [Security](SECURITY.md) · [Docs](docs/README.md) · [Contributing](CONTRIBUTING.md) · [MIT License](LICENSE)
 
 ## What the product is
 
@@ -98,11 +98,11 @@ Interactive sessions ask before an MCP tool runs. Headless commands such as `cod
 ```bash
 hmesh install --approve dispatch   # default: 14 read and dispatch tools
 hmesh install --approve read       # 11 read-only tools
-hmesh install --approve all        # all 18 tools
+hmesh install --approve all        # 16 tools; apply_task_patch and install_integration stay manual
 hmesh install --approve none       # write nothing and remove rules written by hmesh
 ```
 
-`dispatch`, the default, approves the eleven read tools plus `dispatch_task`, `parallel_dispatch` and `cancel_task`. Dispatched work runs in an isolated worktree; its changes reach the primary checkout only through `apply_task_patch`. The four write tools stay manual: `apply_task_patch`, `report_quota_status`, `update_project_context` and `install_integration` change the primary workspace, shared state or another application's configuration. Pass `--approve all` to pre-approve them too.
+`dispatch`, the default, approves the eleven read tools plus `dispatch_task`, `parallel_dispatch` and `cancel_task`. Dispatched work runs in an isolated worktree; its changes reach the primary checkout only through `apply_task_patch`. The four write tools stay manual: `apply_task_patch`, `report_quota_status`, `update_project_context` and `install_integration` change the primary workspace, shared state or another application's configuration. `--approve all` pre-approves `report_quota_status` and `update_project_context` as well, but `apply_task_patch` and `install_integration` are always manual and are never written into a harness allow rule. Independently of harness approvals, the MCP server refuses every write tool under `HARNESS_MESH_READ_ONLY=1` and refuses workers the controller-only write tools; `hmesh apply` and `hmesh install` apply the same gate.
 
 | Harness | File | Rule |
 | :--- | :--- | :--- |
@@ -208,7 +208,7 @@ Disable every background worker for a pure request/response server:
 hmesh-mcp --no-monitor
 ```
 
-The server reads `HARNESS_MESH_WORKSPACE` for the primary project root and `HARNESS_MESH_CONFIG` for an optional YAML configuration.
+The server reads `HARNESS_MESH_WORKSPACE` for the primary project root and `HARNESS_MESH_CONFIG` for an optional YAML configuration. Without that variable the loader reads `$XDG_CONFIG_HOME/harness-mesh/config.yaml` (usually `~/.config/harness-mesh/config.yaml`) and then `~/.harness-mesh/config.yaml`.
 
 ## Supported harnesses
 
@@ -379,7 +379,9 @@ hmesh version
 
 ## Configuration
 
-The template lives at [`config/harnesses.example.yaml`](config/harnesses.example.yaml). Copy it to `.harness-mesh/config.yaml` or pass `--config` / `HARNESS_MESH_CONFIG`. Binary search supports `~` and `*` globs and selects the newest version. ZCode on macOS is wrapped automatically into `.harness-mesh/bin/zcode`.
+The template lives at [`config/harnesses.example.yaml`](config/harnesses.example.yaml). Copy it to `~/.config/harness-mesh/config.yaml` (or any path passed via `--config` / `HARNESS_MESH_CONFIG`). Files inside the checkout (`config/harnesses.yaml`, `.harness-mesh/config.yaml`) are treated as untrusted repository content and are ignored by default: a cloned repository must not be able to choose which binary runs or where credentials are sent. `HARNESS_MESH_TRUST_WORKSPACE_CONFIG=1` merges only non-executable fields (market, routing, sizes, quotas) from the workspace file; `--config` and `HARNESS_MESH_CONFIG` are always trusted because the operator named them explicitly. Resolution order is: the command name on `PATH` (for example `claude`, `codex`, `dsh`, `agy`, `zcode`), then the configured `binary_paths` (built-in macOS app-bundle locations plus any you add), then the macOS ZCode shim. A standard CLI install that lands on `PATH` therefore needs no configuration and no absolute path; the bundled paths only help desktop-app installs that do not put their CLI on `PATH`. If a harness lives outside `PATH`, add it to `binary_paths` in the user-level config file. Binary search supports `~` and `*` globs and selects the newest version. ZCode on macOS is wrapped automatically into `.harness-mesh/bin/zcode`.
+
+The ledger lives under `state_dir`: the directory is created/tightened to `0700`, and `state.db` plus its `-wal`/`-shm` side files to `0600`. Transcripts, diffs and checkpoints are redacted before they are stored; the transcript resource is capped by `transcript_max_chars` (default 200000). If you upgrade from 0.4.1, the first 0.4.2 process rewrites legacy credential-shaped `provider` rows and vacuums the ledger; restart every harness that runs `hmesh-mcp` so the hardened server is the one in use.
 
 Templates support `{prompt}`, `{system_prompt}`, `{system_prompt_file}`, `{model}`, `{effort}`, `{workdir}`, `{mcp_config}`, `{task_id}` and `{assignment_id}`. Empty flag/value pairs are dropped, so `<cli_active_default>` means "use the harness's own active model".
 
@@ -395,6 +397,7 @@ Key settings:
 | `max_active_assignments` | `8` | Global cap on simultaneously running assignments |
 | `summary_max_chars` | `1500` | Summary returned to the controller |
 | `diff_preview_max_chars` | `4000` | Diff preview returned to the controller |
+| `transcript_max_chars` | `200000` | Cap for the paged transcript resource; head and tail are kept |
 | `max_call_depth` | `3` | Nested dispatch depth limit |
 | `max_failover_attempts` | `4` | Maximum failovers per ticket |
 | `quota_probe_interval_seconds` | `60` | Background recovery probe interval |

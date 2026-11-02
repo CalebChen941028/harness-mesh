@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from harness_mesh.approvals import TOOL_APPROVAL_CLASSES, tools_for_level
+from harness_mesh.approvals import (
+    ALWAYS_MANUAL,
+    TOOL_APPROVAL_CLASSES,
+    tools_for_level,
+)
 from harness_mesh.mcp_server import TOOL_NAMES
 
 
@@ -43,8 +47,21 @@ def test_dispatch_level_adds_dispatch_tools_to_read_tools():
     assert "update_project_context" not in level
 
 
-def test_all_level_equals_the_mcp_tool_list():
-    assert tools_for_level("all") == TOOL_NAMES
+def test_always_manual_tools_are_write_tools():
+    assert ALWAYS_MANUAL == {"apply_task_patch", "install_integration"}
+    assert set(ALWAYS_MANUAL) <= set(TOOL_APPROVAL_CLASSES)
+    assert all(TOOL_APPROVAL_CLASSES[name] == "write" for name in ALWAYS_MANUAL)
+
+
+def test_all_level_never_pre_approves_always_manual_tools():
+    level = tools_for_level("all")
+    assert level == [name for name in TOOL_NAMES if name not in ALWAYS_MANUAL]
+    assert set(ALWAYS_MANUAL).isdisjoint(level)
+    # The remaining write tools are still covered by the explicit opt-in.
+    assert "report_quota_status" in level
+    assert "update_project_context" in level
+    # ``all`` still starts from the read + dispatch coverage.
+    assert set(tools_for_level("dispatch")) <= set(level)
 
 
 def test_none_level_approves_nothing():

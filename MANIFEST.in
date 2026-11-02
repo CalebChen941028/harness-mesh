@@ -5,5 +5,10 @@ include README.zh-CN.md
 include SECURITY.md
 include CONTRIBUTING.md
 include CODE_OF_CONDUCT.md
-recursive-include config *.yaml
+include config/harnesses.example.yaml
+include docs/README.md
+include docs/security/2026-11-audit.md
 recursive-include tests *.py *.json *.csv *.txt *.md
+prune src/harness_mesh.egg-info
+global-exclude *.py[cod]
+global-exclude .DS_Store

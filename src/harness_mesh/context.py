@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import re
+import stat
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -23,15 +26,33 @@ CONTEXT_CONTENT_MAX = 4000
 MEMORY_BUDGET = 6000
 
 
-def escape_delimiters(text: str) -> str:
-    """Neutralise boundary markers in untrusted project data, tolerating case/space."""
+_BOUNDARY_TAGS: tuple[str, ...] = (
+    "project_",
+    "context_file_previews",
+    "ticket",
+    "dispatch_context",
+    "assignment_history",
+    "continuation_checkpoint",
+    "stdout",
+    "stderr",
+)
+_BOUNDARY_TAG = re.compile(
+    r"<\s*(/?)\s*(" + "|".join(re.escape(tag) for tag in _BOUNDARY_TAGS) + ")",
+    re.IGNORECASE,
+)
 
-    escaped = str(text)
-    project = re.compile(r"<\s*(/?)\s*(project_)", re.IGNORECASE)
-    previews = re.compile(r"<\s*(/?)\s*(context_file_previews)", re.IGNORECASE)
-    escaped = project.sub(lambda match: f"&lt;{match.group(1)}{match.group(2)}", escaped)
-    escaped = previews.sub(lambda match: f"&lt;{match.group(1)}{match.group(2)}", escaped)
-    return escaped
+
+def escape_delimiters(text: str) -> str:
+    """Neutralise boundary markers in untrusted project data, tolerating case/space.
+
+    NFKC normalisation runs first so full-width lookalikes (``＜ticket＞``)
+    decode to ASCII before the boundary tags are escaped.
+    """
+
+    escaped = unicodedata.normalize("NFKC", str(text))
+    return _BOUNDARY_TAG.sub(
+        lambda match: f"&lt;{match.group(1)}{match.group(2)}", escaped
+    )
 
 
 CONTEXT_CATEGORIES = (
@@ -75,6 +96,43 @@ class ProjectContextManager:
     # ------------------------------------------------------------------
     # instruction bridging
     # ------------------------------------------------------------------
+    def _read_instruction_file(self, root: Path, relative: str) -> str | None:
+        """Read one instruction file only when it is a regular file inside root.
+
+        Symlinks are rejected explicitly (even when they resolve inside the
+        workspace), and a resolved path that points at a sensitive file is
+        skipped.  ``O_NOFOLLOW`` closes the race between the ``lstat`` check and
+        the actual open.
+        """
+
+        path = root / relative
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(root)
+        except (OSError, ValueError, RuntimeError):
+            return None
+        try:
+            status = path.lstat()
+        except OSError:
+            return None
+        if stat.S_ISLNK(status.st_mode) or not stat.S_ISREG(status.st_mode):
+            return None
+        if is_sensitive_path(resolved):
+            return None
+        try:
+            descriptor = os.open(resolved, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError:
+            return None
+        try:
+            with os.fdopen(descriptor, "r", encoding="utf-8", errors="replace") as handle:
+                return handle.read()
+        except OSError:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            return None
+
     def collect_project_instructions(self, workspace_root: str | Path | None = None) -> list[dict[str, str]]:
         root = Path(workspace_root).expanduser().resolve() if workspace_root else self.workspace_root
         collected: list[dict[str, str]] = []
@@ -82,14 +140,8 @@ class ProjectContextManager:
         for relative in PROJECT_INSTRUCTION_FILES:
             if remaining <= 0:
                 break
-            path = root / relative
-            if not path.is_file():
-                continue
-            try:
-                text = path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            if not text.strip():
+            text = self._read_instruction_file(root, relative)
+            if text is None or not text.strip():
                 continue
             excerpt = text[:remaining]
             remaining -= len(excerpt)

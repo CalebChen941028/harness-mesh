@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -13,11 +14,14 @@ from typing import Any, Optional
 import typer
 import yaml
 
-from .approvals import APPROVAL_LEVELS, DEFAULT_APPROVAL_LEVEL
+from .approvals import ALWAYS_MANUAL, APPROVAL_LEVELS, DEFAULT_APPROVAL_LEVEL
 from .config import (
+    default_user_config_path,
     find_config_path,
+    find_user_config_path,
     integration_config_path,
     load_config,
+    resolve_harness_binary,
     update_integration_ignore,
 )
 from .installer import NO_APPROVAL_DETAIL, HarnessInstaller
@@ -26,6 +30,7 @@ from .lineage import (
     _merge_trace_chain,
     _resolved_lineage,
     _workspace_from_cwd,
+    caller_task_id,
 )
 from .market import (
     EPOCH_ATTRIBUTION,
@@ -151,21 +156,27 @@ def _approval_summary(level: str, results) -> str:
     for result in results:
         if result.installed:
             approved.update(result.approvals.get("tools") or [])
+    always_manual = " and ".join(f"`{name}`" for name in sorted(ALWAYS_MANUAL))
     if level == "none":
         return (
             "No MCP tools were pre-approved; headless runs will be denied. "
             "Use `--approve read` or `--approve dispatch` to pre-approve them."
         )
     if level == "all" and approved:
-        return f"Approved {len(approved)} tools (all); headless runs no longer need per-call approval."
+        return (
+            f"Approved {len(approved)} tools (all); {always_manual} always require manual "
+            "approval and are never pre-approved."
+        )
     if approved:
         return (
             f"Approved {len(approved)} tools; headless runs still need manual approval for "
-            "`apply_task_patch` and other write tools. Use `--approve all` to change that."
+            f"{always_manual} and other write tools. Use `--approve all` to pre-approve the "
+            f"remaining write tools ({always_manual} stay manual)."
         )
     return (
         "The selected harnesses need no approval settings; headless runs still need manual "
-        "approval for `apply_task_patch` and other write tools. Use `--approve all` to change that."
+        f"approval for {always_manual} and other write tools. Use `--approve all` to "
+        f"pre-approve the remaining write tools ({always_manual} stay manual)."
     )
 
 
@@ -292,6 +303,113 @@ def _echo_install_results(results) -> None:
             typer.echo(f"  cmd : {' '.join(command)}")
 
 
+def _worker_install_refusal() -> str:
+    return (
+        "Workers cannot change harness integrations; only the controller may "
+        "install after the user agrees"
+    )
+
+
+def _cli_caller_is_worker(workspace: str, config) -> bool:
+    """Best-effort worker detection for CLI write commands.
+
+    The environment marker and a cwd inside a task worktree are decisive and
+    cheap.  When a ledger already exists we also ask the shared lineage
+    resolver (process ancestry/markers) without creating state on a fresh
+    workspace.
+    """
+
+    if str(os.environ.get("HARNESS_MESH_TASK_ID") or "").strip():
+        return True
+    root = Path(workspace).expanduser().resolve()
+    state_dir = config.state_path(root)
+    try:
+        worktrees = (state_dir / "worktrees").resolve()
+        if Path.cwd().resolve().is_relative_to(worktrees):
+            return True
+    except (OSError, ValueError):
+        pass
+    if not (state_dir / "state.db").exists():
+        return False
+    try:
+        runtime = create_mesh_runtime(workspace_root=root, config=config)
+    except RuntimeError:
+        return False
+    try:
+        return bool(caller_task_id(runtime.router))
+    finally:
+        runtime.storage.close()
+
+
+def _install_refusal(workspace: str, config) -> str | None:
+    """Why ``hmesh install`` must not run here, or ``None`` when allowed."""
+
+    if os.environ.get("HARNESS_MESH_READ_ONLY") == "1":
+        return (
+            "harness-mesh is running read-only (HARNESS_MESH_READ_ONLY=1); "
+            "installation is disabled"
+        )
+    if _cli_caller_is_worker(workspace, config):
+        return _worker_install_refusal()
+    return None
+
+
+def _apply_refusal(workspace: str, config) -> str | None:
+    """Why ``hmesh apply`` must not run here, or ``None`` when allowed.
+
+    The MCP ``apply_task_patch`` tool already refuses read-only callers and
+    workers; the CLI is the same write operation and needs the same gate, or a
+    prompt-injected worker could bypass the tool-level restriction by running
+    the command in its shell.
+    """
+
+    if os.environ.get("HARNESS_MESH_READ_ONLY") == "1":
+        return (
+            "harness-mesh is running read-only (HARNESS_MESH_READ_ONLY=1); "
+            "applying patches is disabled"
+        )
+    if _cli_caller_is_worker(workspace, config):
+        return (
+            "workers cannot apply patches to the primary workspace; only the "
+            "controller may run `hmesh apply`"
+        )
+    return None
+
+def _binary_hint(config, workspace: str) -> str | None:
+    """One-line guidance when a configured harness CLI cannot be resolved.
+
+    The resolver already tries ``PATH`` before the bundled app-bundle paths, so
+    this hint only fires for harnesses that are still missing.  It points at the
+    two supported fixes: install the vendor CLI on ``PATH``, or list its
+    location under ``binary_paths`` in the user-level config file.
+    """
+
+    missing: list[str] = []
+    for name in ("claude_code", "codex", "deepseek", "antigravity", "zcode"):
+        harness = config.harnesses.get(name)
+        if harness is None or not harness.enabled:
+            continue
+        try:
+            found = resolve_harness_binary(
+                harness,
+                shutil.which,
+                config.state_path(workspace),
+                create_shim=False,
+            )
+        except (OSError, RuntimeError):
+            found = None
+        if found is None:
+            missing.append(name)
+    if not missing:
+        return None
+    target = default_user_config_path()
+    names = ", ".join(missing)
+    return (
+        f"binary hint: no CLI found for {names}; install the vendor CLI and put it on PATH, "
+        f"or add `harnesses.<name>.binary_paths` in {target} (or pass --config)"
+    )
+
+
 @app.command()
 def install(
     ctx: typer.Context,
@@ -305,7 +423,11 @@ def install(
     approve: str = typer.Option(
         DEFAULT_APPROVAL_LEVEL,
         "--approve",
-        help="Pre-approve MCP tools: read, dispatch (default), all, or none.",
+        help=(
+            "Pre-approve MCP tools: read, dispatch (default), all, or none. "
+            "`all` covers the write tools except apply_task_patch and "
+            "install_integration, which always require manual approval."
+        ),
     ),
 ) -> None:
     """One-command installation of Harness-Mesh into every detected harness UI."""
@@ -325,12 +447,16 @@ def install(
     except RuntimeError as exc:
         typer.echo(f"Cannot install from this workspace: {exc}", err=True)
         raise typer.Exit(code=1)
+    refusal = _install_refusal(workspace, config)
+    if refusal is not None:
+        typer.echo(f"Cannot install: {refusal}", err=True)
+        raise typer.Exit(code=1)
 
     def build(dry: bool):
         return HarnessInstaller(
             config,
             workspace,
-            config_path=config_path or find_config_path(workspace),
+            config_path=config_path or find_user_config_path(),
             dry_run=dry,
             approval_level=level,
         )
@@ -342,6 +468,10 @@ def install(
     if not json_output:
         typer.echo("Planned changes:")
         _echo_install_results(planned)
+        if not uninstall:
+            hint = _binary_hint(config, workspace)
+            if hint is not None:
+                typer.echo(hint)
     if dry_run:
         return
     if not yes:
@@ -363,6 +493,10 @@ def install(
         _echo_install_results(results)
         if not uninstall and any(result.installed for result in results):
             typer.echo(_approval_summary(level, results))
+        if not uninstall:
+            hint = _binary_hint(config, workspace)
+            if hint is not None:
+                typer.echo(hint)
     if any(result.action == "failed" for result in results):
         raise typer.Exit(code=1)
 
@@ -501,6 +635,9 @@ def doctor(
             ]
         )
         typer.echo(f"{len(installed)} of {total} harnesses installed")
+        hint = _binary_hint(config, workspace)
+        if hint is not None:
+            typer.echo(hint)
         _echo_integration_hint(
             config, workspace, config_path or find_config_path(workspace)
         )
@@ -547,6 +684,9 @@ def status(
             )
         if item.tier_models:
             typer.echo("  tiers : " + ", ".join(f"{tier}={model}" for tier, model in item.tier_models.items()))
+    hint = _binary_hint(runtime.config, str(runtime.router.workspace_root))
+    if hint is not None:
+        typer.echo(hint)
     _echo_integration_hint(
         runtime.config,
         str(runtime.router.workspace_root),
@@ -803,6 +943,10 @@ def apply(
         raise typer.Exit(code=2)
     runtime = _runtime(ctx)
     try:
+        refusal = _apply_refusal(str(runtime.router.workspace_root), runtime.config)
+        if refusal is not None:
+            typer.echo(refusal, err=True)
+            raise typer.Exit(code=1)
         payload = runtime.router.apply_task_patch(task_id, strategy=strategy)
     finally:
         runtime.storage.close()
@@ -890,12 +1034,16 @@ def context_set(
 
     runtime = _runtime(ctx)
     try:
+        # A worker shell must never record a controller-verified fact: resolve
+        # the caller through the same lineage logic the MCP server uses.
+        source = "worker" if caller_task_id(runtime.router) else "controller"
         payload = runtime.router.update_project_context(
             key,
             content,
             category=category,
             author_harness=author_harness,
             task_id=task_id,
+            source=source,
         )
     finally:
         runtime.storage.close()

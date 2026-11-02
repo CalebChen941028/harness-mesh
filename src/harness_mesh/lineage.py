@@ -259,6 +259,29 @@ def _task_id_from_cwd(router: Any) -> str | None:
     return lineage.task_id if lineage is not None else None
 
 
+def caller_task_id(router: Any) -> str | None:
+    """Return the task id of the calling worker, or ``None`` for a controller.
+
+    A worker is identified by the inherited ``HARNESS_MESH_TASK_ID`` first and
+    by the recorded ancestry/worktree lineage second.  A caller with neither
+    is treated as a controller (a human or a controller harness).
+    """
+
+    env_task = str(os.environ.get("HARNESS_MESH_TASK_ID") or "").strip()
+    if env_task:
+        return env_task
+    lineage = _resolved_lineage(router)
+    if lineage is not None and str(lineage.task_id or "").strip():
+        return str(lineage.task_id)
+    return None
+
+
+def caller_is_worker(router: Any) -> bool:
+    """True when the caller can be resolved to a worker assignment."""
+
+    return caller_task_id(router) is not None
+
+
 def _inherited_lineage(router: Any) -> tuple[int, list[str]]:
     lineage = _resolved_lineage(router)
     if lineage is None:

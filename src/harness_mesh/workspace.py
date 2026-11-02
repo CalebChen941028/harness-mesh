@@ -16,7 +16,12 @@ from typing import Any, Iterable, Mapping
 
 from .config import cap_text
 from .models import ContinuationCheckpoint, TaskRequest, utc_now
-from .security import is_sensitive_path, sensitive_git_pathspecs
+from .security import (
+    filter_sensitive_paths,
+    is_sensitive_path,
+    redact_text,
+    sensitive_git_pathspecs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +73,228 @@ class ApplyResult:
 
 _SAFE_TASK_ID = re.compile(r"[^A-Za-z0-9._-]+")
 
+# Ticket ids become directory names under ``worktrees/`` and branch components,
+# so one shared pattern validates them.  The leading alphanumeric rules out
+# ".", ".." and any dot-prefixed state directory; ".." and trailing dots are
+# rejected explicitly because git accepts both inside a name.
+_TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_RESERVED_TASK_IDS = frozenset({".meta", "worktrees", "tmp", "mcp", "git-guards"})
+_WORKTREE_MARKER_NAME = ".harness-mesh-worktree.json"
+_META_FILE_NAMES = frozenset({".harness-mesh-lineage.json", _WORKTREE_MARKER_NAME})
+# Maximum argv bytes handed to one ``git diff`` when the installed Git build
+# lacks ``--pathspec-from-file`` for ``git diff``; bigger changes are split
+# into independently generated (and concatenable) patch chunks.
+_DIFF_ARGV_CHUNK_CHARS = 60_000
+_GIT_QUOTED_ESCAPES = {
+    "a": 7,
+    "b": 8,
+    "f": 12,
+    "n": 10,
+    "r": 13,
+    "t": 9,
+    "v": 11,
+    "\\": 92,
+    '"': 34,
+}
+
+
+def _unquote_git_path(token: str) -> str:
+    """Decode a C-style quoted path as emitted by ``git diff``/``git status``.
+
+    Git quotes paths that contain non-ASCII bytes, control characters, quotes
+    or backslashes (``core.quotePath`` defaults to true).  Parsers that only
+    look for a literal ``+++ b/`` prefix are trivially bypassed by a filename
+    such as ``docs/链接``; this decoder normalises both forms first.
+    """
+
+    text = str(token).strip()
+    if len(text) < 2 or not (text.startswith('"') and text.endswith('"')):
+        return text
+    body = text[1:-1]
+    out = bytearray()
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char != "\\":
+            out.extend(char.encode("utf-8", "surrogateescape"))
+            index += 1
+            continue
+        index += 1
+        if index >= len(body):
+            out.extend(b"\\")
+            break
+        escape = body[index]
+        if escape in _GIT_QUOTED_ESCAPES:
+            out.append(_GIT_QUOTED_ESCAPES[escape])
+            index += 1
+            continue
+        if escape in "01234567":
+            digits = ""
+            while index < len(body) and len(digits) < 3 and body[index] in "01234567":
+                digits += body[index]
+                index += 1
+            out.append(int(digits, 8) & 0xFF)
+            continue
+        out.extend(escape.encode("utf-8", "surrogateescape"))
+        index += 1
+    return out.decode("utf-8", "surrogateescape")
+
+
+def _is_meta_file(relative: str) -> bool:
+    return Path(relative).name in _META_FILE_NAMES
+
+
+def _meta_git_excludes() -> list[str]:
+    specs: list[str] = []
+    for name in sorted(_META_FILE_NAMES):
+        specs.append(f":(exclude){name}")
+        specs.append(f":(exclude)**/{name}")
+    return specs
+
+
+def _parse_name_status_z(payload: str) -> list[str]:
+    """Path list from ``git diff --name-status -z`` (status NUL path NUL)."""
+
+    entries = str(payload).split("\0")
+    paths: list[str] = []
+    index = 0
+    while index < len(entries):
+        status = entries[index]
+        index += 1
+        if not status:
+            continue
+        if index >= len(entries):
+            break
+        first = entries[index]
+        index += 1
+        paths.append(first)
+        if status[0] in ("R", "C") and index < len(entries):
+            second = entries[index]
+            index += 1
+            paths.append(second)
+    return [path for path in paths if path]
+
+
+def _parse_raw_z(payload: str) -> list[dict[str, str]]:
+    """Entries of ``git diff --raw -z`` (``:modes shas status NUL path NUL``)."""
+
+    entries = str(payload).split("\0")
+    records: list[dict[str, str]] = []
+    index = 0
+    while index + 1 < len(entries):
+        header = entries[index]
+        path = entries[index + 1]
+        index += 2
+        if not header.startswith(":"):
+            continue
+        fields = header[1:].split()
+        if len(fields) < 5:
+            continue
+        records.append(
+            {
+                "old_mode": fields[0],
+                "new_mode": fields[1],
+                "status": fields[4],
+                "path": path,
+            }
+        )
+    return records
+
+
+def _diff_header_path(raw: str) -> str | None:
+    """Return the repository-relative path from a ``+++``/``---`` header."""
+
+    value = str(raw).strip()
+    if not value or value == "/dev/null":
+        return None
+    value = value.split("\t", 1)[0]
+    if value.startswith('"'):
+        value = _unquote_git_path(value)
+    if value.startswith("b/") or value.startswith("a/"):
+        value = value[2:]
+    return value
+
+
+def _parse_diff_blocks(diff: str) -> list[dict[str, Any]]:
+    """Split a unified diff into blocks with decoded paths and modes."""
+
+    blocks: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for line in str(diff).splitlines():
+        if line.startswith("diff --git "):
+            if current is not None:
+                blocks.append(current)
+            current = {
+                "path": None,
+                "old_path": None,
+                "new_mode": None,
+                "plus_lines": [],
+                "in_hunk": False,
+            }
+            continue
+        if current is None:
+            continue
+        if line.startswith("new file mode "):
+            current["new_mode"] = line[len("new file mode ") :].strip().split()[0]
+        elif line.startswith("new mode "):
+            current["new_mode"] = line[len("new mode ") :].strip().split()[0]
+        elif line.startswith("index "):
+            fields = line.split()
+            if len(fields) >= 3 and current["new_mode"] is None:
+                mode = fields[-1]
+                if len(mode) == 6 and mode.isdigit():
+                    current["new_mode"] = mode
+        elif line.startswith("--- "):
+            current["old_path"] = _diff_header_path(line[4:])
+        elif line.startswith("+++ "):
+            current["path"] = _diff_header_path(line[4:])
+        elif line.startswith("@@"):
+            current["in_hunk"] = True
+        elif current["in_hunk"] and line.startswith("+"):
+            current["plus_lines"].append(line[1:])
+    if current is not None:
+        blocks.append(current)
+    return blocks
+
+
+def _filter_diff_text(diff: str) -> tuple[str, list[str]]:
+    """Drop diff blocks whose target path is sensitive or mesh-owned."""
+
+    text = str(diff)
+    if not text.strip():
+        return "", []
+    if not _parse_diff_blocks(text):
+        return text, []
+    kept: list[str] = []
+    skipped: set[str] = set()
+    current: list[str] = []
+    current_path: str | None = None
+    for line in text.splitlines(keepends=True):
+        if line.startswith("diff --git "):
+            if current:
+                if current_path is not None and (
+                    is_sensitive_path(current_path) or _is_meta_file(current_path)
+                ):
+                    skipped.add(current_path)
+                else:
+                    kept.extend(current)
+            current = [line]
+            current_path = None
+            continue
+        current.append(line)
+        if line.startswith("+++ "):
+            current_path = _diff_header_path(line[4:])
+        elif line.startswith("--- ") and current_path is None:
+            current_path = _diff_header_path(line[4:])
+    if current:
+        if current_path is not None and (
+            is_sensitive_path(current_path) or _is_meta_file(current_path)
+        ):
+            skipped.add(current_path)
+        else:
+            kept.extend(current)
+    return "".join(kept), sorted(skipped)
+
 
 class WorkspaceManager:
     """Owns ``.harness-mesh/worktrees/<task_id>`` for every ticket.
@@ -102,6 +329,10 @@ class WorkspaceManager:
         self.env.setdefault("GIT_TERMINAL_PROMPT", "0")
         self.baseline_ref = baseline_ref
         self.auto_init_repo = bool(auto_init_repo)
+        # ``--pathspec-from-file`` is not available in every git build (the
+        # Apple Git shipped on macOS 15 rejects it for ``git diff``), so the
+        # capability is probed once and argv pathspecs are the fallback.
+        self._supports_pathspec_file: bool | None = None
 
     # ------------------------------------------------------------------
     # low-level git helpers
@@ -166,7 +397,7 @@ class WorkspaceManager:
         except OSError:
             return None
 
-    def _git_metadata_snapshot(self) -> dict:
+    def _git_metadata_snapshot(self, task_id: str | None = None) -> dict:
         common = self._git_common_dir()
         if common is None:
             return {}
@@ -182,22 +413,245 @@ class WorkspaceManager:
                     digest = self._hash_file(entry)
                     if digest is not None:
                         hook_hashes[entry.relative_to(hooks).as_posix()] = digest
-        return {"config": config_hash, "attributes": attributes_hash, "hooks": hook_hashes}
+        snapshot = {
+            "config": config_hash,
+            "attributes": attributes_hash,
+            "hooks": hook_hashes,
+            "worktree_git_file": None,
+            "worktree_gitdir": None,
+            "gitdir_commondir": None,
+        }
+        if task_id is None:
+            return snapshot
+        try:
+            worktree = self.worktree_path(task_id)
+        except WorkspaceError:
+            return snapshot
+        snapshot["worktree_git_file"] = self._hash_file(worktree / ".git")
+        try:
+            gitdir = self._parse_worktree_gitdir(worktree)
+        except WorkspaceError:
+            gitdir = None
+        if gitdir is not None:
+            snapshot["worktree_gitdir"] = str(gitdir)
+            snapshot["gitdir_commondir"] = self._hash_file(gitdir / "commondir")
+        return snapshot
 
     def _git_guard_path(self, task_id: str) -> Path:
         safe = _SAFE_TASK_ID.sub("_", task_id)
         return self.git_guard_dir / f"{safe}.json"
+
+    # ------------------------------------------------------------------
+    # task identity / worktree integrity
+    # ------------------------------------------------------------------
+    @staticmethod
+    def validate_task_id(task_id: str) -> str:
+        """Return a safe ticket id or raise ``WorkspaceError``.
+
+        The same rule as ``TaskRequest`` keeps every caller (MCP, CLI,
+        internal resumptions) from smuggling path components into
+        ``worktrees/<task_id>`` or into a git branch name.
+        """
+
+        text = str(task_id or "").strip()
+        if not _TASK_ID_RE.fullmatch(text):
+            raise WorkspaceError(
+                "invalid task_id: expected ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+            )
+        if ".." in text:
+            raise WorkspaceError("invalid task_id: '..' is not allowed")
+        if text.endswith("."):
+            raise WorkspaceError("invalid task_id: trailing '.' is not allowed")
+        if text in _RESERVED_TASK_IDS:
+            raise WorkspaceError(f"invalid task_id: {text!r} is reserved")
+        return text
+
+    def _parse_worktree_gitdir(self, worktree: Path) -> Path:
+        """Validate ``<worktree>/.git`` and return the recorded gitdir.
+
+        A worktree's ``.git`` is an ordinary file inside the agent-writable
+        directory.  Rewriting it lets the agent point mesh-side git commands
+        at an attacker-controlled gitdir (whose config can execute a clean
+        filter), so mesh only accepts a regular ``gitdir:`` file whose target
+        is ``<common>/worktrees/<name>`` and whose backlink points back at
+        this exact worktree.
+        """
+
+        gitfile = worktree / ".git"
+        if gitfile.is_symlink() or not gitfile.is_file():
+            raise WorkspaceError(f"worktree .git is not a regular file: {gitfile}")
+        try:
+            content = gitfile.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise WorkspaceError(f"cannot read worktree .git file {gitfile}: {exc}") from exc
+        stripped = content.strip()
+        if not stripped.lower().startswith("gitdir:") or "\n" in stripped:
+            raise WorkspaceError(f"worktree .git has an invalid header: {gitfile}")
+        raw = stripped.split(":", 1)[1].strip()
+        if not raw:
+            raise WorkspaceError(f"worktree .git has an empty gitdir target: {gitfile}")
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = worktree / candidate
+        try:
+            resolved = candidate.resolve()
+        except OSError as exc:
+            raise WorkspaceError(f"cannot resolve worktree gitdir {raw!r}: {exc}") from exc
+        if not resolved.is_dir():
+            raise WorkspaceError(f"worktree gitdir is not a directory: {resolved}")
+        common = self._git_common_dir()
+        if common is None:
+            raise WorkspaceError("cannot resolve the repository common git directory")
+        admin_root = (common / "worktrees").resolve()
+        if resolved == admin_root or not self._is_relative_to(resolved, admin_root):
+            raise WorkspaceError(
+                f"worktree gitdir is outside {admin_root}: {resolved}"
+            )
+        backlink = resolved / "gitdir"
+        if backlink.exists():
+            try:
+                expected_raw = backlink.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError as exc:
+                raise WorkspaceError(f"cannot read worktree gitdir backlink: {exc}") from exc
+            if expected_raw:
+                expected = Path(expected_raw)
+                if not expected.is_absolute():
+                    expected = resolved / expected
+                try:
+                    expected_path = expected.resolve()
+                except OSError:
+                    expected_path = expected
+                if expected_path != gitfile.resolve():
+                    raise WorkspaceError(
+                        "worktree gitdir backlink does not point at this worktree"
+                    )
+        return resolved
+
+    def _validated_worktree_gitdir(self, task_id: str, *, path: Path | None = None) -> Path:
+        """Validate a task worktree's ``.git`` pointer before any git command."""
+
+        worktree = Path(path) if path is not None else self.worktree_path(task_id)
+        if not worktree.exists():
+            raise WorkspaceError(f"worktree does not exist for task {task_id}: {worktree}")
+        return self._parse_worktree_gitdir(worktree)
+
+    def _recognised_legacy_worktree(self, task_id: str, worktree: Path, branch: str) -> bool:
+        """True for a pre-marker worktree that provably belongs to this ticket.
+
+        Upgrade path only.  Everything is checked before the mesh writes a
+        marker: the ``.git`` pointer must pass full validation, the baseline
+        metadata must match task/branch/path, the checked-out branch must be
+        the ticket branch and the repository toplevel must be the worktree
+        itself.  Any failed check leaves the directory untouched.
+        """
+
+        try:
+            self._validated_worktree_gitdir(task_id, path=worktree)
+        except WorkspaceError:
+            return False
+        marker = self._read_baseline_marker(task_id)
+        if not marker:
+            return False
+        if str(marker.get("task_id") or "") != task_id:
+            return False
+        if str(marker.get("branch") or "") != branch:
+            return False
+        recorded_path = marker.get("worktree_path")
+        if recorded_path:
+            try:
+                if Path(str(recorded_path)).expanduser().resolve() != worktree.resolve():
+                    return False
+            except OSError:
+                return False
+        current = self._git(["symbolic-ref", "--short", "HEAD"], cwd=worktree)
+        if current.returncode != 0 or current.stdout.strip() != branch:
+            return False
+        toplevel = self._git(["rev-parse", "--show-toplevel"], cwd=worktree)
+        if toplevel.returncode != 0:
+            return False
+        try:
+            if Path(toplevel.stdout.strip()).resolve() != worktree.resolve():
+                return False
+        except OSError:
+            return False
+        return True
+
+    def _validate_worktree_for_path(self, target: Path) -> None:
+        """Validate the owning task worktree for ``target`` (if any).
+
+        ``target`` is normally the worktree root, but a caller may pass a
+        directory inside it; the outermost component under ``worktrees/`` is
+        validated in that case so no git command ever runs against an
+        unvalidated worktree.
+        """
+
+        try:
+            resolved = Path(target).resolve()
+            root = self.worktrees_root.resolve()
+        except OSError:
+            return
+        if resolved == root:
+            return
+        try:
+            relative = resolved.relative_to(root)
+        except ValueError:
+            return
+        parts = relative.parts
+        if not parts:
+            return
+        candidate = root / parts[0]
+        if not candidate.is_dir():
+            return
+        try:
+            self._validated_worktree_gitdir(parts[0], path=candidate)
+        except WorkspaceError:
+            # Only fail closed for directories that actually look like a
+            # worktree; unrelated entries under the state dir stay ignorable.
+            if (candidate / ".git").exists():
+                raise
+
+    # ------------------------------------------------------------------
+    # worktree marker
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _worktree_marker_path(worktree: Path) -> Path:
+        return Path(worktree) / _WORKTREE_MARKER_NAME
+
+    def _read_worktree_marker(self, worktree: Path) -> dict[str, Any] | None:
+        path = self._worktree_marker_path(worktree)
+        if path.is_symlink() or not path.is_file():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _write_worktree_marker(self, info: WorktreeInfo) -> None:
+        path = self._worktree_marker_path(info.path)
+        try:
+            path.write_text(
+                json.dumps(
+                    {"task_id": info.task_id, "branch": info.branch},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            path.chmod(0o444)
+        except OSError as exc:
+            logger.warning("unable to write worktree marker for %s: %s", info.task_id, exc)
 
     def _record_git_guard(self, task_id: str) -> None:
         guard_path = self._git_guard_path(task_id)
         if guard_path.exists():
             return
         try:
-            snapshot = self._git_metadata_snapshot()
+            snapshot = self._git_metadata_snapshot(task_id)
             self.git_guard_dir.mkdir(parents=True, exist_ok=True)
             payload = {"task_id": task_id, "snapshot": snapshot}
             guard_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        except OSError as exc:
+        except (OSError, WorkspaceError) as exc:
             logger.warning("unable to record Git metadata guard for %s: %s", task_id, exc)
 
     def verify_git_guard(self, task_id: str) -> None:
@@ -212,7 +666,23 @@ class WorkspaceManager:
             saved = json.loads(guard_path.read_text(encoding="utf-8")).get("snapshot", {})
         except (OSError, json.JSONDecodeError):
             raise WorkspaceError(f"Git metadata guard for {task_id} is unreadable")
-        current = self._git_metadata_snapshot()
+        if saved and "worktree_git_file" not in saved:
+            # Guard recorded by a release before worktree ``.git`` hashing
+            # existed.  Re-record it once from the current (already validated)
+            # state instead of aborting every upgraded ticket.
+            logger.warning(
+                "upgrading legacy Git metadata guard for task %s", task_id
+            )
+            try:
+                snapshot = self._git_metadata_snapshot(task_id)
+                payload = {"task_id": task_id, "snapshot": snapshot}
+                guard_path.write_text(
+                    json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+                )
+            except OSError:
+                pass
+            return
+        current = self._git_metadata_snapshot(task_id)
         if saved == current:
             return
         changes: list[str] = []
@@ -297,6 +767,9 @@ class WorkspaceManager:
             self.state_dir, self.workspace_root
         ) else None
         entries.append(f"/{relative_state.as_posix()}/" if relative_state else str(self.state_dir))
+        # ``state_dir`` comes from configuration; a newline would inject
+        # arbitrary ignore patterns (for example ``*``) into the repository.
+        entries = [entry for entry in entries if entry.strip() and "\n" not in entry and "\r" not in entry]
         existing_lines = set(existing.splitlines())
         additions = [entry for entry in entries if entry not in existing_lines]
         if additions:
@@ -315,8 +788,10 @@ class WorkspaceManager:
             return False
 
     def _safe_id(self, task_id: str) -> str:
-        cleaned = _SAFE_TASK_ID.sub("_", task_id.strip())
-        return cleaned or "task"
+        # The id is both a directory name and a branch component.  Validate
+        # instead of collapsing characters: collapsing lets distinct ids such
+        # as "victim_ticket" and "victim/ticket" share one worktree.
+        return self.validate_task_id(task_id)
 
     def worktree_path(self, task_id: str) -> Path:
         return self.worktrees_root / self._safe_id(task_id)
@@ -367,6 +842,7 @@ class WorkspaceManager:
             return str(marker["baseline_commit"])
         path = self.worktree_path(task_id)
         if path.exists():
+            self._validated_worktree_gitdir(task_id, path=path)
             result = self._git(["rev-parse", "HEAD"], cwd=path)
             if result.returncode == 0:
                 return result.stdout.strip()
@@ -388,23 +864,50 @@ class WorkspaceManager:
         base_ref: str | None = None,
         sync_uncommitted: bool = True,
     ) -> WorktreeInfo:
+        task_id = self.validate_task_id(task_id)
         self.ensure_repository()
-        self._record_git_guard(task_id)
         path = self.worktree_path(task_id)
         branch = self.branch_name(task_id)
         if path.exists():
+            if path.is_symlink() or not path.is_dir():
+                raise WorkspaceError(f"worktree path is not a plain directory: {path}")
             if (path / ".git").exists():
-                marker = self._read_baseline_marker(task_id) or {}
-                baseline = marker.get("baseline_commit")
-                if not baseline:
+                marker = self._read_worktree_marker(path)
+                if marker is None:
+                    # Worktrees created before the marker existed are adopted
+                    # once, but only after strict validation: .git pointer,
+                    # expected branch, matching baseline metadata and toplevel.
+                    if not self._recognised_legacy_worktree(task_id, path, branch):
+                        raise WorkspaceError(
+                            "worktree directory exists without a matching marker file "
+                            f"({_WORKTREE_MARKER_NAME}) or compatible baseline metadata: {path}"
+                        )
+                    logger.warning(
+                        "adopting marker-less worktree for task %s after validation", task_id
+                    )
+                    self._write_worktree_marker(
+                        WorktreeInfo(task_id=task_id, path=path, branch=branch)
+                    )
+                elif (
+                    str(marker.get("task_id") or "") != task_id
+                    or str(marker.get("branch") or "") != branch
+                ):
+                    raise WorkspaceError(
+                        f"worktree marker mismatch ({_WORKTREE_MARKER_NAME}): {path}"
+                    )
+                self._validated_worktree_gitdir(task_id, path=path)
+                baseline = self._read_baseline_marker(task_id) or {}
+                baseline_commit = baseline.get("baseline_commit")
+                if not baseline_commit:
                     head = self._git(["rev-parse", "HEAD"], cwd=path)
-                    baseline = head.stdout.strip() if head.returncode == 0 else None
+                    baseline_commit = head.stdout.strip() if head.returncode == 0 else None
+                self._record_git_guard(task_id)
                 return WorktreeInfo(
                     task_id=task_id,
                     path=path,
                     branch=branch,
                     reused=True,
-                    baseline_commit=str(baseline) if baseline else None,
+                    baseline_commit=str(baseline_commit) if baseline_commit else None,
                 )
             # Stale directory from a crashed run: remove only when it is safely
             # contained inside our own worktrees root.
@@ -432,6 +935,9 @@ class WorkspaceManager:
                 f"failed to create worktree for {task_id}: {result.stderr.strip() or result.stdout.strip()}"
             )
         info = WorktreeInfo(task_id=task_id, path=path, branch=branch, reused=False)
+        # ``git worktree add`` just wrote ``.git``; anything else means the
+        # directory was tampered with between creation and use.
+        self._validated_worktree_gitdir(task_id, path=path)
         if sync_uncommitted:
             self._sync_uncommitted_changes(path)
             self._commit_worktree_baseline(task_id, path, "harness-mesh: baseline sync")
@@ -440,6 +946,8 @@ class WorkspaceManager:
         info.escaping_symlinks = self._normalize_worktree_symlinks(path)
         self._write_baseline_marker(info)
         self._write_lineage_marker(path, task_id)
+        self._write_worktree_marker(info)
+        self._record_git_guard(task_id)
         return info
 
     def _write_lineage_marker(self, worktree_path: Path, task_id: str) -> None:
@@ -530,6 +1038,7 @@ class WorkspaceManager:
         makes this inherited state invisible to ``capture_changes``.
         """
 
+        self._parse_worktree_gitdir(worktree_path)
         diff = self._git(["diff", "HEAD", "--binary", "--no-color"], cwd=self.workspace_root)
         if diff.returncode == 0 and diff.stdout.strip():
             applied = self._git(
@@ -542,8 +1051,8 @@ class WorkspaceManager:
 
         status = self._git(["status", "--porcelain", "-z"], cwd=self.workspace_root)
         if status.returncode == 0:
-            for relative in self._parse_porcelain_paths(status.stdout):
-                if self._is_state_path(relative) or is_sensitive_path(relative):
+            for relative in self._porcelain_paths(status.stdout):
+                if self._is_state_path(relative) or _is_meta_file(relative) or is_sensitive_path(relative):
                     continue
                 src = self.workspace_root / relative
                 dst = worktree_path / relative
@@ -559,7 +1068,7 @@ class WorkspaceManager:
         status = self._git(["status", "--porcelain", "-z"], cwd=self.workspace_root)
         if status.returncode != 0:
             return
-        for relative in self._parse_porcelain_paths(status.stdout):
+        for relative in self._porcelain_paths(status.stdout):
             if self._is_state_path(relative) or is_sensitive_path(relative):
                 continue
             src = self.workspace_root / relative
@@ -572,25 +1081,8 @@ class WorkspaceManager:
             elif not src.exists() and dst.exists():
                 dst.unlink()
 
-    def _parse_porcelain_paths(self, payload: str) -> list[str]:
-        entries = payload.split("\0")
-        paths: list[str] = []
-        index = 0
-        while index < len(entries):
-            entry = entries[index]
-            index += 1
-            if not entry or len(entry) < 4:
-                continue
-            status = entry[:2]
-            relative = entry[3:]
-            if status[0] in ("R", "C") and index < len(entries):
-                # The original path follows in the next NUL-separated entry.
-                index += 1
-            paths.append(relative)
-        return paths
-
     def _is_state_path(self, relative: str) -> bool:
-        if Path(relative).name == ".harness-mesh-lineage.json":
+        if _is_meta_file(relative):
             return True
         try:
             state_rel = self.state_dir.resolve().relative_to(self.workspace_root)
@@ -599,7 +1091,11 @@ class WorkspaceManager:
         return relative == state_rel.as_posix() or relative.startswith(state_rel.as_posix() + "/")
 
     def _commit_worktree_baseline(self, task_id: str, worktree_path: Path, message: str) -> str | None:
-        self._git(["add", "-A", "--", ".", *sensitive_git_pathspecs()], cwd=worktree_path)
+        self._validated_worktree_gitdir(task_id, path=worktree_path)
+        self._git(
+            ["add", "-A", "--", ".", *sensitive_git_pathspecs(), *_meta_git_excludes()],
+            cwd=worktree_path,
+        )
         result = self._git(
             [
                 "-c",
@@ -624,15 +1120,25 @@ class WorkspaceManager:
     def inherit_diff(self, task_id: str, diff: str, *, label: str = "upstream dependency") -> bool:
         """Apply an upstream task diff into a worktree and fold it into baseline."""
 
-        if not diff.strip():
+        task_id = self.validate_task_id(task_id)
+        if not str(diff).strip():
             return False
         path = self.worktree_path(task_id)
+        self._validated_worktree_gitdir(task_id, path=path)
         if not path.exists():
             raise WorkspaceError(f"worktree does not exist for task {task_id}")
+        filtered, skipped = _filter_diff_text(diff)
+        if skipped:
+            logger.info(
+                "inherited %s diff skipped sensitive paths: %s", label, ", ".join(skipped)
+            )
+        if not filtered.strip():
+            return False
+        self._check_diff_symlinks(filtered, path, path)
         applied = self._git(
             ["apply", "--whitespace=nowarn", "--recount", "--binary", "-"],
             cwd=path,
-            input_text=diff,
+            input_text=filtered,
         )
         if applied.returncode != 0:
             return False
@@ -645,6 +1151,7 @@ class WorkspaceManager:
         return True
 
     def remove_worktree(self, task_id: str, *, delete_branch: bool = False) -> None:
+        task_id = self.validate_task_id(task_id)
         path = self.worktree_path(task_id)
         branch = self.branch_name(task_id)
         if path.exists():
@@ -679,30 +1186,134 @@ class WorkspaceManager:
     # ------------------------------------------------------------------
     # change capture
     # ------------------------------------------------------------------
-    def modified_files(self, path: str | Path) -> list[str]:
-        target = Path(path)
-        if not self.is_git_repo(target):
-            return []
-        result = self._git(["status", "--porcelain", "-z"], cwd=target)
-        if result.returncode != 0:
-            return []
-        entries = result.stdout.split("\0")
-        files: set[str] = set()
+    @staticmethod
+    def _porcelain_paths(payload: str) -> list[str]:
+        entries = str(payload).split("\0")
+        paths: list[str] = []
         index = 0
         while index < len(entries):
             entry = entries[index]
             index += 1
-            if not entry:
-                continue
-            if len(entry) < 4:
+            if not entry or len(entry) < 4:
                 continue
             status = entry[:2]
             file_path = entry[3:]
             if status[0] in ("R", "C") and index < len(entries):
                 # The original path is stored in the next NUL separated entry.
                 index += 1
-            files.add(file_path)
-        return sorted(files)
+            if file_path:
+                paths.append(file_path)
+        return paths
+
+    def _status_paths(self, target: Path) -> list[str]:
+        result = self._git(["status", "--porcelain", "-z"], cwd=target)
+        if result.returncode != 0:
+            return []
+        return self._porcelain_paths(result.stdout)
+
+    def _raw_changed_paths(self, target: Path, ref: str | None) -> tuple[list[str], bool]:
+        """Changed paths from ``git diff --name-status -z`` (paths unfiltered)."""
+
+        args = ["diff", "--name-status", "-z"]
+        if ref:
+            args.append(ref)
+        args.append("--")
+        result = self._git(args, cwd=target)
+        if result.returncode != 0:
+            return [], False
+        return _parse_name_status_z(result.stdout), True
+
+    def _expand_directory_entries(self, target: Path, paths: list[str]) -> list[str]:
+        """Expand porcelain's collapsed untracked directories into files.
+
+        ``git status --porcelain`` reports a fully untracked directory as one
+        entry such as ``deep/``; filtering that single entry would hide
+        sensitive files nested inside it.
+        """
+
+        expanded: list[str] = []
+        for path in paths:
+            if path.endswith("/"):
+                directory = target / path
+                try:
+                    is_directory = directory.is_dir() and not directory.is_symlink()
+                except OSError:
+                    is_directory = False
+                if is_directory:
+                    for child in sorted(directory.rglob("*")):
+                        if child.is_file() or child.is_symlink():
+                            expanded.append(child.relative_to(target).as_posix())
+                    continue
+            expanded.append(path)
+        return expanded
+
+    def _visible_paths(self, target: Path, ref: str | None, paths: list[str]) -> list[str]:
+        """Filter mesh-owned and sensitive paths out of a changed-path list."""
+
+        candidates = [
+            path
+            for path in paths
+            if path and not self._is_state_path(path) and not _is_meta_file(path)
+        ]
+        visible, _skipped = filter_sensitive_paths(candidates)
+        return visible
+
+    def _diff_visible_paths(self, target: Path, ref: str | None, paths: list[str]) -> str:
+        """Generate a diff restricted to ``paths`` (literal pathspecs only)."""
+
+        if not paths:
+            return ""
+        base_args = ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-color"]
+        if ref:
+            base_args.append(ref)
+        if self._supports_pathspec_file is not False:
+            result = self._git(
+                [*base_args, "--pathspec-from-file=-", "--pathspec-file-nul"],
+                cwd=target,
+                input_text="\0".join(paths),
+            )
+            if result.returncode == 0:
+                self._supports_pathspec_file = True
+                return result.stdout
+            if self._supports_pathspec_file is None and "pathspec-from-file" in (
+                result.stderr or ""
+            ):
+                self._supports_pathspec_file = False
+        # Fallback for git builds without ``--pathspec-from-file`` support for
+        # ``git diff``.  Paths are separated by ``--`` and the process uses
+        # ``--literal-pathspecs``, so names beginning with ``-`` or ``:`` are
+        # treated as filenames, never as options/pathspec magic.  Large
+        # changes are split into chunks to stay well below ARG_MAX; the
+        # resulting per-chunk patches concatenate into one valid patch.
+        chunks: list[list[str]] = []
+        current: list[str] = []
+        current_size = 0
+        for path in paths:
+            size = len(path) + 1
+            if current and current_size + size > _DIFF_ARGV_CHUNK_CHARS:
+                chunks.append(current)
+                current = []
+                current_size = 0
+            current.append(path)
+            current_size += size
+        if current:
+            chunks.append(current)
+        output: list[str] = []
+        for chunk in chunks:
+            result = self._git([*base_args, "--", *chunk], cwd=target)
+            if result.returncode != 0:
+                return ""
+            output.append(result.stdout)
+        return "".join(output)
+
+    def modified_files(self, path: str | Path) -> list[str]:
+        target = Path(path)
+        self._validate_worktree_for_path(target)
+        if not self.is_git_repo(target):
+            return []
+        status_paths = self._expand_directory_entries(target, self._status_paths(target))
+        visible = self._visible_paths(target, None, status_paths)
+        return sorted(visible)
 
     def collect_diff(
         self,
@@ -712,49 +1323,34 @@ class WorkspaceManager:
         base_ref: str | None = None,
     ) -> str:
         target = Path(path)
+        self._validate_worktree_for_path(target)
         if not self.is_git_repo(target):
             return ""
         ref = base_ref or self.baseline_for_path(target) or "HEAD"
         # ``git add -N`` records intent-to-add so that brand-new files appear in
         # the diff with their full content.  It does not stage content,
         # therefore it is safe inside an isolated worktree.
-        excludes = [
-            *sensitive_git_pathspecs(),
-            ":(exclude).harness-mesh-lineage.json",
-            ":(exclude)**/.harness-mesh-lineage.json",
-        ]
+        excludes = [*sensitive_git_pathspecs(), *_meta_git_excludes()]
         if stage_untracked:
             self._git(["add", "-N", "--", ".", *excludes], cwd=target)
-        result = self._git(
-            ["diff", "--no-ext-diff", ref, "--no-color", "--", ".", *excludes], cwd=target
-        )
-        if result.returncode != 0:
-            # A repository without commits: show the staged/worktree diff instead.
-            result = self._git(["diff", "--no-ext-diff", "--no-color"], cwd=target)
-        return result.stdout
+        raw, ok = self._raw_changed_paths(target, ref)
+        if ok:
+            return self._diff_visible_paths(target, ref, self._visible_paths(target, ref, raw))
+        # A repository without a usable baseline commit: diff the index/worktree
+        # instead, still restricted to the visible paths.
+        raw, _ = self._raw_changed_paths(target, None)
+        return self._diff_visible_paths(target, None, self._visible_paths(target, None, raw))
 
     def diff_files(self, path: str | Path, *, base_ref: str | None = None) -> list[str]:
         target = Path(path)
+        self._validate_worktree_for_path(target)
         if not self.is_git_repo(target):
             return []
         ref = base_ref or self.baseline_for_path(target) or "HEAD"
-        result = self._git(
-            [
-                "diff",
-                "--no-ext-diff",
-                "--name-only",
-                ref,
-                "--",
-                ".",
-                *sensitive_git_pathspecs(),
-                ":(exclude).harness-mesh-lineage.json",
-                ":(exclude)**/.harness-mesh-lineage.json",
-            ],
-            cwd=target,
-        )
-        if result.returncode != 0:
+        raw, ok = self._raw_changed_paths(target, ref)
+        if not ok:
             return []
-        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        return sorted(self._visible_paths(target, ref, raw))
 
     def collect_changes(
         self,
@@ -764,31 +1360,35 @@ class WorkspaceManager:
         base_ref: str | None = None,
     ) -> Changes:
         target = Path(path)
+        self._validate_worktree_for_path(target)
         ref = base_ref or self.baseline_for_path(target)
         diff = self.collect_diff(target, stage_untracked=stage_untracked, base_ref=ref)
+        status_paths = self._expand_directory_entries(target, self._status_paths(target))
         raw_files = {
             path
-            for path in set(self.modified_files(target)) | set(self.diff_files(target, base_ref=ref))
-            if not self._is_state_path(path)
+            for path in [*status_paths, *self._raw_changed_paths(target, ref)[0]]
+            if path and not self._is_state_path(path) and not _is_meta_file(path)
         }
-        skipped: list[str] = []
-        for path in sorted(raw_files):
-            if not is_sensitive_path(path):
-                continue
+        visible, skipped = filter_sensitive_paths(sorted(raw_files))
+        expanded: list[str] = []
+        for path in skipped:
             candidate = target / path
-            if candidate.is_dir() and not candidate.is_symlink():
+            try:
+                is_directory = candidate.is_dir() and not candidate.is_symlink()
+            except OSError:
+                is_directory = False
+            if is_directory:
                 for child in sorted(candidate.rglob("*")):
                     if child.is_file() or child.is_symlink():
-                        skipped.append(child.relative_to(target).as_posix())
+                        expanded.append(child.relative_to(target).as_posix())
             else:
-                skipped.append(path)
-        visible = sorted(path for path in raw_files if not is_sensitive_path(path))
+                expanded.append(path)
         return Changes(
             worktree_path=str(target),
-            modified_files=visible,
+            modified_files=sorted(visible),
             diff=diff,
             base_ref=ref or "HEAD",
-            skipped_sensitive=skipped,
+            skipped_sensitive=sorted(set(expanded) | set(skipped)),
         )
 
     def capture_checkpoint(
@@ -806,8 +1406,8 @@ class WorkspaceManager:
     ) -> ContinuationCheckpoint:
         target = Path(workdir)
         changes = self.collect_changes(target, stage_untracked=stage_untracked)
-        diff, _ = cap_text(changes.diff, max_diff_chars)
-        tail, _ = cap_text((stdout_tail or "")[-8000:], 4000)
+        diff, _ = cap_text(redact_text(changes.diff), max_diff_chars)
+        tail, _ = cap_text(redact_text((stdout_tail or "")[-8000:]), 4000)
         return ContinuationCheckpoint(
             interrupted_harness=harness,
             interrupted_model=model,
@@ -831,12 +1431,14 @@ class WorkspaceManager:
         strategy: str = "patch",
         fallback_to_copy: bool = False,
     ) -> ApplyResult:
+        task_id = self.validate_task_id(task_id)
         source = self.worktree_path(task_id)
         target = Path(workspace_root).expanduser().resolve() if workspace_root else self.workspace_root
         if not source.exists():
             raise WorkspaceError(f"worktree does not exist for task {task_id}: {source}")
         if source.resolve() == target.resolve():
             return ApplyResult(task_id=task_id, strategy=strategy, detail="already in the primary workspace")
+        self._validated_worktree_gitdir(task_id, path=source)
         self._verify_git_guard(task_id)
         changes = self.collect_changes(source)
         self._check_diff_symlinks(changes.diff, source, target)
@@ -854,37 +1456,49 @@ class WorkspaceManager:
         if not changes.diff.strip():
             return ApplyResult(task_id=task_id, strategy=strategy, detail="no changes to apply")
 
+        files = list(changes.modified_files)
+        if strategy == "merge":
+            # ``git apply --3way`` writes conflict markers into the working tree
+            # before it reports the conflict, so a dirty target cannot be
+            # restored reliably.  Require the affected files to be clean first.
+            self._ensure_clean_merge_target(target, files)
+
         self.tmp_dir.mkdir(parents=True, exist_ok=True)
         patch_args = ["apply", "--whitespace=nowarn", "--recount"]
         if strategy == "merge":
             patch_args.append("--3way")
         preflight = self._git([*patch_args, "--check", "-"], cwd=target, input_text=changes.diff)
         if preflight.returncode != 0:
-            conflicts = self._conflict_files(preflight.stderr + preflight.stdout, changes.modified_files)
+            conflicts = self._conflict_files(preflight.stderr + preflight.stdout, files)
             raise WorkspaceError(
                 f"patch preflight failed for task {task_id}; conflicting files: "
                 f"{', '.join(conflicts) if conflicts else 'unknown'}; primary workspace left untouched"
             )
+        pre_existing = {path for path in files if (target / path).exists() or (target / path).is_symlink()}
+        pre_existing_links = {path for path in files if (target / path).is_symlink()}
         result = self._git([*patch_args, "-"], cwd=target, input_text=changes.diff)
         if result.returncode == 0:
+            self._verify_applied_symlinks(target, files, pre_existing_links)
             return ApplyResult(
                 task_id=task_id,
                 strategy=strategy,
-                applied_files=list(changes.modified_files),
+                applied_files=files,
                 detail="patch applied",
                 warnings=list(changes.skipped_sensitive),
             )
         conflict_detail = result.stderr.strip() or result.stdout.strip()
+        # The real apply can still fail after a successful preflight (that is
+        # exactly what a conflicting ``git apply --3way`` does).  Restore the
+        # affected files before surfacing the error instead of claiming the
+        # primary workspace was untouched.
+        self._rollback_failed_apply(target, files, pre_existing)
         if strategy == "merge":
-            # A failed 3-way merge must never be "resolved" by copying whole
-            # files over the primary checkout: that silently destroys local
-            # changes. Surface the conflict instead.
             raise WorkspaceError(
-                f"merge conflict for task {task_id}; primary workspace left untouched: {conflict_detail[:1000]}"
+                f"merge conflict for task {task_id}; primary workspace rolled back: {conflict_detail[:1000]}"
             )
         if not fallback_to_copy:
             raise WorkspaceError(
-                f"failed to apply patch for task {task_id}: {conflict_detail[:1000]}"
+                f"failed to apply patch for task {task_id}; primary workspace rolled back: {conflict_detail[:1000]}"
             )
         applied = self._copy_changes(source, target, changes.modified_files)
         return ApplyResult(
@@ -892,7 +1506,7 @@ class WorkspaceManager:
             strategy=strategy,
             applied_files=applied,
             used_fallback=True,
-            detail=f"patch failed, copied files instead: {result.stderr.strip()[:500]}",
+            detail=f"patch failed, rolled back and copied files instead: {result.stderr.strip()[:500]}",
         )
 
     @staticmethod
@@ -908,38 +1522,170 @@ class WorkspaceManager:
                     conflicts.append(name)
         return conflicts
 
-    def _check_diff_symlinks(self, diff: str, source: Path, target_root: Path) -> None:
-        path: str | None = None
-        symlink_mode = False
-        for line in diff.splitlines():
-            if line.startswith("diff --git "):
-                path = None
-                symlink_mode = False
+    def _ensure_clean_merge_target(self, target: Path, files: Iterable[str]) -> None:
+        literal = [str(item) for item in files if str(item)]
+        if not literal:
+            return
+        result = self._git(
+            ["--literal-pathspecs", "status", "--porcelain", "-z", "--", *literal],
+            cwd=target,
+        )
+        if result.returncode != 0:
+            return
+        entries = [entry for entry in result.stdout.split("\0") if entry.strip()]
+        names: list[str] = []
+        for entry in entries:
+            name = entry[3:] if len(entry) > 3 else entry.strip()
+            if name and name not in names:
+                names.append(name)
+        if names:
+            raise WorkspaceError(
+                "merge strategy requires a clean target workspace for the affected files; "
+                "uncommitted changes in: " + ", ".join(names[:10])
+            )
+
+    def _tracked_paths(self, target: Path, files: Iterable[str]) -> set[str]:
+        literal = [str(item) for item in files if str(item)]
+        if not literal:
+            return set()
+        result = self._git(
+            ["--literal-pathspecs", "ls-files", "-z", "--", *literal],
+            cwd=target,
+        )
+        if result.returncode != 0:
+            return set()
+        return {entry for entry in result.stdout.split("\0") if entry}
+
+    def _rollback_failed_apply(
+        self,
+        target: Path,
+        files: Iterable[str],
+        pre_existing: set[str],
+    ) -> None:
+        literal = sorted({str(item) for item in files if str(item)})
+        if not literal:
+            return
+        tracked = self._tracked_paths(target, literal)
+        self._git(["--literal-pathspecs", "reset", "-q", "--", *literal], cwd=target)
+        tracked_present = [path for path in literal if path in tracked]
+        if tracked_present:
+            self._git(
+                ["--literal-pathspecs", "checkout", "--", *tracked_present],
+                cwd=target,
+            )
+        for relative in literal:
+            if relative in pre_existing:
                 continue
-            if line.startswith("new file mode 120000") or (
-                line.startswith("index ") and "120000" in line
-            ):
-                symlink_mode = True
+            created = target / relative
+            try:
+                if created.is_symlink() or created.exists():
+                    created.unlink()
+            except OSError:
+                pass
+
+    def _verify_applied_symlinks(
+        self,
+        target: Path,
+        files: Iterable[str],
+        pre_existing_links: Iterable[str],
+    ) -> None:
+        candidates = {str(item) for item in files if str(item)}
+        previous = {str(item) for item in pre_existing_links if str(item)}
+        if not candidates:
+            return
+        result = self._git(
+            ["--literal-pathspecs", "diff", "--raw", "-z", "--no-ext-diff"], cwd=target
+        )
+        if result.returncode != 0:
+            return
+        root = target.resolve()
+        for record in _parse_raw_z(result.stdout):
+            path = record.get("path") or ""
+            if path not in candidates or path in previous:
                 continue
-            if line.startswith("+++ b/"):
-                path = line[6:].strip()
+            if record.get("new_mode") != "120000":
                 continue
-            if not symlink_mode or path is None or not line.startswith("+"):
+            if str(record.get("status") or "").startswith("D"):
                 continue
-            raw_target = line[1:].strip()
+            candidate = target / path
+            if not candidate.is_symlink():
+                continue
+            try:
+                raw_target = os.readlink(candidate)
+            except OSError:
+                continue
             target_path = Path(raw_target)
             if not target_path.is_absolute():
-                target_path = (source / path).parent / target_path
+                target_path = candidate.parent / target_path
             try:
                 resolved = target_path.resolve(strict=False)
             except OSError:
                 resolved = target_path
-            if not self._is_relative_to(resolved, target_root.resolve()):
+            if not self._is_relative_to(resolved, root):
+                try:
+                    candidate.unlink()
+                except OSError:
+                    pass
                 raise WorkspaceError(
-                    f"symlink {path} points outside the target workspace: {raw_target}"
+                    f"applied symlink {path} points outside the target workspace: {raw_target}"
                 )
-            path = None
-            symlink_mode = False
+
+        # ``git diff --raw`` does not show untracked files (``git apply``
+        # writes without touching the index), so newly created links are also
+        # checked directly.
+        for path in sorted(candidates - previous):
+            candidate = target / path
+            try:
+                if not candidate.is_symlink():
+                    continue
+                raw_target = os.readlink(candidate)
+            except OSError:
+                continue
+            target_path = Path(raw_target)
+            if not target_path.is_absolute():
+                target_path = candidate.parent / target_path
+            try:
+                resolved = target_path.resolve(strict=False)
+            except OSError:
+                resolved = target_path
+            if not self._is_relative_to(resolved, root):
+                try:
+                    candidate.unlink()
+                except OSError:
+                    pass
+                raise WorkspaceError(
+                    f"applied symlink {path} points outside the target workspace: {raw_target}"
+                )
+
+    def _check_diff_symlinks(self, diff: str, source: Path, target_root: Path) -> None:
+        """Reject any diff block that creates a symlink escaping ``target_root``.
+
+        Paths are decoded from the diff headers (C-style quoting included) via
+        the shared block parser; parsing the raw text for ``+++ b/`` was
+        bypassable with a non-ASCII filename.
+        """
+
+        root = Path(target_root).resolve()
+        for block in _parse_diff_blocks(diff):
+            if str(block.get("new_mode") or "") != "120000":
+                continue
+            path = block.get("path")
+            if not path:
+                raise WorkspaceError("symlink patch block has no target path")
+            for raw_value in block.get("plus_lines") or []:
+                raw_target = str(raw_value).strip()
+                if not raw_target:
+                    raise WorkspaceError(f"symlink {path} has an empty target")
+                candidate = Path(raw_target)
+                target_path = candidate if candidate.is_absolute() else (root / path).parent / candidate
+                try:
+                    resolved = target_path.resolve(strict=False)
+                except OSError:
+                    resolved = target_path
+                if not self._is_relative_to(resolved, root):
+                    raise WorkspaceError(
+                        f"symlink {path} points outside the target workspace: {raw_target}"
+                    )
 
     def _copy_changes(self, source: Path, target: Path, files: Iterable[str]) -> list[str]:
         applied: list[str] = []
@@ -974,9 +1720,26 @@ class WorkspaceManager:
         return applied
 
     def _safe_remove_dir(self, path: Path, root: Path) -> None:
-        resolved = path.resolve()
-        if not self._is_relative_to(resolved, root.resolve()):
+        target = Path(path)
+        try:
+            root_resolved = Path(root).resolve()
+            resolved = target.resolve()
+        except OSError as exc:
+            raise WorkspaceError(f"cannot resolve path for removal: {exc}") from exc
+        if resolved == root_resolved:
+            raise WorkspaceError(f"refusing to remove the worktrees root itself: {resolved}")
+        try:
+            relative = resolved.relative_to(root_resolved)
+        except ValueError as exc:
+            raise WorkspaceError(
+                f"refusing to remove directory outside worktrees root: {resolved}"
+            ) from exc
+        if not relative.parts or ".." in relative.parts:
             raise WorkspaceError(f"refusing to remove directory outside worktrees root: {resolved}")
+        if target.is_symlink():
+            # Only unlink the link; rmtree() would follow it and delete its target.
+            target.unlink()
+            return
         shutil.rmtree(resolved)
 
     def write_temp_patch(self, content: str) -> Path:

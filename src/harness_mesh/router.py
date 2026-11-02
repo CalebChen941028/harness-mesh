@@ -49,7 +49,12 @@ from .routing import (
     infer_task_kind,
     tier_for,
 )
-from .security import WorkspaceRootError, ensure_service_workspace, resolve_allowed_root
+from .security import (
+    WorkspaceRootError,
+    ensure_service_workspace,
+    redact_text,
+    resolve_allowed_root,
+)
 from .skills import SkillPluginManager
 from .storage import StateStore, TaskNotFoundError
 from .workspace import Changes, WorkspaceError, WorkspaceManager
@@ -245,6 +250,15 @@ class MeshRouter:
                     f"max_active_assignments limit reached ({self.config.max_active_assignments})",
                     started,
                 )
+        # The in-process duplicate check in ``dispatch`` cannot see another
+        # MCP server process.  A running assignment row for the same task_id in
+        # the shared ledger therefore blocks this dispatch before any worktree
+        # or ticket row is (re)used.  This rejection must not touch storage:
+        # the ticket being protected is owned by the other live dispatch.
+        conflicts = self.storage.count_running_assignments_for_task(request.task_id)
+        if conflicts > 0:
+            return self._task_conflict_result(request, conflicts)
+
         trace_chain = list(request.trace_chain)
         initial_harness = (
             target if target != "auto" else (self._first_runnable_harness() or "auto")
@@ -1095,7 +1109,7 @@ class MeshRouter:
             self.config.summary_max_chars,
         )
         diff_preview, diff_truncated = cap_text(
-            changes.diff or "", self.config.diff_preview_max_chars
+            redact_text(changes.diff or ""), self.config.diff_preview_max_chars
         )
         transcript_text = self._render_transcripts(request, transcripts)
         result = self._build_result(
@@ -1124,7 +1138,7 @@ class MeshRouter:
             ],
             transcript_text=transcript_text,
         )
-        self.storage.save_resource(request.task_id, "diff", changes.diff or "")
+        self.storage.save_resource(request.task_id, "diff", redact_text(changes.diff or ""))
         self.storage.update_task(
             request.task_id,
             blocked_harness=None,
@@ -1186,8 +1200,8 @@ class MeshRouter:
                     )
                 except WorkspaceError:
                     inherited = False
-            summary_excerpt, _ = cap_text(summary, 1500)
-            diff_excerpt, _ = cap_text(diff or "", 4000)
+            summary_excerpt, _ = cap_text(redact_text(summary), 1500)
+            diff_excerpt, _ = cap_text(redact_text(diff or ""), 4000)
             blocks.append(f"## {dependency}")
             blocks.append(f"status: {record.get('status')}")
             blocks.append(f"summary: {summary_excerpt or '(none)'}")
@@ -1755,8 +1769,12 @@ class MeshRouter:
         assignments = self.storage.list_assignments(request.task_id)
         hops = self.storage.list_failover_hops(request.task_id)
         task_id = request.task_id
-        raw_stdout, _ = cap_text(outcome.stdout if outcome else "", self.config.diff_preview_max_chars)
-        raw_stderr, _ = cap_text(outcome.stderr if outcome else "", self.config.diff_preview_max_chars)
+        raw_stdout, _ = cap_text(
+            redact_text(outcome.stdout if outcome else ""), self.config.diff_preview_max_chars
+        )
+        raw_stderr, _ = cap_text(
+            redact_text(outcome.stderr if outcome else ""), self.config.diff_preview_max_chars
+        )
         result = TaskResult(
             task_id=task_id,
             initial_harness=initial_harness,
@@ -1825,8 +1843,10 @@ class MeshRouter:
             try:
                 changes = ws.collect_changes(workdir, stage_untracked=True)
                 modified = changes.modified_files
-                diff, truncated = cap_text(changes.diff or "", self.config.diff_preview_max_chars)
-                self.storage.save_resource(request.task_id, "diff", changes.diff or "")
+                diff, truncated = cap_text(
+                    redact_text(changes.diff or ""), self.config.diff_preview_max_chars
+                )
+                self.storage.save_resource(request.task_id, "diff", redact_text(changes.diff or ""))
             except Exception:
                 pass
         transcript_text = (
@@ -1942,6 +1962,20 @@ class MeshRouter:
             status=TaskStatus.REJECTED,
             summary="Rejected: another dispatch for this task_id is still active.",
             error_detail=f"duplicate_active_task:{request.task_id}",
+        )
+
+    def _task_conflict_result(self, request: TaskRequest, conflicts: int) -> TaskResult:
+        """Reject a cross-process duplicate ticket without mutating its ledger row."""
+
+        return TaskResult(
+            task_id=request.task_id,
+            initial_harness=request.target_harness,
+            target_harness=request.target_harness,
+            status=TaskStatus.REJECTED,
+            summary=(
+                "Rejected: this task_id already has a running assignment in the shared ledger."
+            ),
+            error_detail=f"task_conflict:{request.task_id}:{conflicts}",
         )
 
     def _rejected_result(self, request: TaskRequest, reason: str, started: float) -> TaskResult:
@@ -2117,7 +2151,7 @@ class MeshRouter:
                 interruption_reason=reason,
                 partial_modified_files=[],
                 partial_git_diff="",
-                partial_stdout_tail=(stdout or "")[-4000:],
+                partial_stdout_tail=redact_text((stdout or "")[-4000:]),
                 worktree_path=str(workdir),
                 last_assignment_id=assignment_id,
             )
@@ -2138,7 +2172,7 @@ class MeshRouter:
                     interrupted_harness=harness,
                     interrupted_model=model,
                     interruption_reason=reason,
-                    partial_stdout_tail=(stdout or "")[-4000:],
+                    partial_stdout_tail=redact_text((stdout or "")[-4000:]),
                     worktree_path=str(workdir),
                     last_assignment_id=assignment_id,
                 )
@@ -2170,21 +2204,48 @@ class MeshRouter:
             parsed_output=str(outcome),
         )
 
+    def _transcript_limit(self) -> int:
+        """Configured transcript resource cap (default 200_000 characters)."""
+
+        try:
+            return max(0, int(getattr(self.config, "transcript_max_chars", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _cap_transcript(text: str, limit: int) -> str:
+        """Keep head and tail halves when a transcript exceeds ``limit``."""
+
+        if limit <= 0 or len(text) <= limit:
+            return text
+        marker = "\n[... transcript truncated ...]\n"
+        keep = max(0, limit - len(marker))
+        head = keep // 2
+        tail = keep - head
+        if tail:
+            return f"{text[:head]}{marker}{text[-tail:]}"
+        return f"{text[:head]}{marker}"
+
     def _append_transcript(self, task_id: str, transcript_text: str) -> None:
         """Append a dispatch's transcript to the ticket-level resource.
 
         A resumed ticket executes in a second dispatch; replacing the resource
         would lose the stdout/stderr of the quota-interrupted assignment and
         make ``read_task_resource(task_id, "transcript")`` incomplete.
+        Credential-shaped text is redacted and the resource is bounded by
+        ``config.transcript_max_chars``.
         """
 
-        if not transcript_text:
+        piece = redact_text(transcript_text or "")
+        if not piece:
             return
         existing = self.storage.get_resource(task_id, "transcript") or ""
-        if existing and existing.endswith(transcript_text):
+        if existing and existing.endswith(piece):
             return
-        combined = f"{existing}\n\n{transcript_text}" if existing else transcript_text
-        self.storage.save_resource(task_id, "transcript", combined)
+        combined = f"{existing}\n\n{piece}" if existing else piece
+        self.storage.save_resource(
+            task_id, "transcript", self._cap_transcript(combined, self._transcript_limit())
+        )
 
     def _render_transcripts(self, request: TaskRequest, transcripts: list[dict[str, Any]]) -> str:
         blocks: list[str] = []
@@ -2216,7 +2277,7 @@ class MeshRouter:
                 )
             )
         if not transcripts:
-            return "\n\n".join(blocks)
+            return redact_text("\n\n".join(blocks))
         for item in transcripts:
             blocks.append(
                 "\n".join(
@@ -2227,15 +2288,15 @@ class MeshRouter:
                         f"exit_code: {item.get('exit_code')} timed_out: {item.get('timed_out')}",
                         f"session_id: {item.get('session_id') or 'n/a'}",
                         "<stdout>",
-                        item.get("stdout") or "",
+                        redact_text(item.get("stdout") or ""),
                         "</stdout>",
                         "<stderr>",
-                        item.get("stderr") or "",
+                        redact_text(item.get("stderr") or ""),
                         "</stderr>",
                     ]
                 )
             )
-        return "\n\n".join(blocks)
+        return redact_text("\n\n".join(blocks))
 
     def _existing_record(self, task_id: str) -> dict[str, Any] | None:
         try:
@@ -2536,14 +2597,14 @@ class MeshRouter:
                 "harness": harness,
                 "error": str(exc),
                 "installed": True,
-                "models": [model.model_dump(mode="json") for model in models],
+                "models": [model.public_view() for model in models],
                 "tier_models": self._tier_models_from_models(models),
             }
         models = self._apply_market_scores(models)
         return {
             "harness": harness,
             "installed": True,
-            "models": [model.model_dump(mode="json") for model in models],
+            "models": [model.public_view() for model in models],
             "tier_models": self._tier_models_from_models(models),
             "authorized_models": [model.model_id for model in models if model.authorized],
         }
@@ -2564,7 +2625,7 @@ class MeshRouter:
         category: str = "note",
         author_harness: str = "controller",
         task_id: str | None = None,
-        source: str = "controller",
+        source: str = "auto",
     ) -> dict[str, Any]:
         return self.context.update(
             key,

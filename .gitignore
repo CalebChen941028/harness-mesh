@@ -1,5 +1,7 @@
 .venv/
 .harness-mesh/
+.claude/
+config/harnesses.yaml
 __pycache__/
 *.py[cod]
 .pytest_cache/
